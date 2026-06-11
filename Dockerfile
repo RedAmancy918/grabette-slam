@@ -32,7 +32,7 @@ ARG RTABMAP_VERSION=0.23.1
 RUN git clone --depth 1 --branch ${RTABMAP_VERSION} https://github.com/introlab/rtabmap.git /tmp/rtabmap \
  && cmake -S /tmp/rtabmap -B /tmp/rtabmap/build \
         -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_APP=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF \
- && cmake --build /tmp/rtabmap/build --parallel $(nproc) \
+ && cmake --build /tmp/rtabmap/build --parallel 2 \
  && cmake --install /tmp/rtabmap/build \
  && ldconfig \
  && rm -rf /tmp/rtabmap
