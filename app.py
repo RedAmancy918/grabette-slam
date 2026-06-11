@@ -50,16 +50,15 @@ def run(source_repo, target_repo, task,
     viz_url = _visualizer_url(target_repo)
     log(f"✅ Pushed {n} episode(s).")
 
+    # The LeRobot visualizer sends X-Frame-Options: deny, so it can't be embedded
+    # in an iframe — link out (opens in a new tab) instead.
     summary = (
         f"### ✅ Done — {n} episode(s)\n"
         f"- **Dataset:** [{target_repo}]({ds_url})\n"
-        f"- **Visualize:** [open in LeRobot visualizer]({viz_url})\n\n"
+        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
         f"_(The visualizer needs the dataset to be public.)_"
     )
-    iframe = (
-        f'<iframe src="{viz_url}" width="100%" height="650" frameborder="0"></iframe>'
-    )
-    return "\n".join(logs), summary, iframe
+    return "\n".join(logs), summary
 
 
 with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
@@ -79,10 +78,9 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
 
     log_out = gr.Textbox(label="Log", lines=15)
     summary_out = gr.Markdown()
-    viz_out = gr.HTML(label="LeRobot visualizer")
 
     btn.click(run, inputs=[source, target, task],
-              outputs=[log_out, summary_out, viz_out])
+              outputs=[log_out, summary_out])
 
 
 if __name__ == "__main__":
