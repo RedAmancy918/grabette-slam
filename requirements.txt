@@ -1,0 +1,5 @@
+# UI + plotting deps for the Space. The grabette-postprocess package (and its
+# deps: lerobot, numpy, opencv, pandas, ...) is installed from source in the
+# Dockerfile.
+gradio>=4.0
+matplotlib
