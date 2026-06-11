@@ -13,8 +13,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # --- System deps: RTAB-Map build chain + Python 3.12 (deadsnakes) + ffmpeg ---
 # Python 3.12 is required by lerobot. opencv-python (pip wheel) needs libgl1.
+# gnupg + dirmngr are needed by add-apt-repository to import the PPA key
+# (ubuntu:22.04 minimal ships without them).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends software-properties-common ca-certificates \
+ && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates gnupg dirmngr \
  && add-apt-repository -y ppa:deadsnakes/ppa \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
