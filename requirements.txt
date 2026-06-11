@@ -1,4 +1,5 @@
 # UI + Hub deps for the Space. The grabette-postprocess package (and its deps:
 # lerobot, numpy, opencv, pandas, ...) is installed from source in the Dockerfile.
-gradio>=4.0
+# gradio[oauth] pulls itsdangerous/authlib, required by gr.LoginButton (HF OAuth).
+gradio[oauth]>=4.0
 huggingface_hub>=0.20
