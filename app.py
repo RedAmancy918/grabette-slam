@@ -5,11 +5,12 @@ source dataset and push the generated LeRobot dataset under their account.
 Gradio auto-injects the gr.OAuthToken parameter — it is NOT a UI input.
 """
 
+import os
 import tempfile
 from pathlib import Path
 
 import gradio as gr
-from huggingface_hub import login, snapshot_download
+from huggingface_hub import snapshot_download
 
 from pipeline import process_dataset
 
@@ -27,7 +28,10 @@ def run(source_repo, target_repo, task,
     if not (source_repo and target_repo and task):
         raise gr.Error("Fill in source repo, target repo and task.")
 
-    login(token=oauth_token.token)  # download + push use this account
+    # OAuth access tokens aren't accepted by huggingface_hub.login() (it expects a
+    # classic token's role). Expose the token via env + pass it explicitly so
+    # snapshot_download and push_to_hub pick it up.
+    os.environ["HF_TOKEN"] = oauth_token.token
 
     logs: list[str] = []
 
@@ -37,7 +41,8 @@ def run(source_repo, target_repo, task,
 
     work = Path(tempfile.mkdtemp())
     log(f"Downloading {source_repo}…")
-    raw = snapshot_download(source_repo, repo_type="dataset", local_dir=work / "raw")
+    raw = snapshot_download(source_repo, repo_type="dataset",
+                            local_dir=work / "raw", token=oauth_token.token)
 
     n = process_dataset(raw, target_repo, task, root=work / "lerobot", log=log)
 

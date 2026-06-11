@@ -48,8 +48,8 @@ def run_slam(dataset_dir, log=print) -> list[Path]:
 def process_dataset(dataset_dir, target_repo, task, root, log=print) -> int:
     """Convert + SLAM + build a LeRobot dataset + push it to the Hub.
 
-    The caller must huggingface_hub.login() first so push_to_hub uploads under
-    that account. Returns the number of episodes included in the dataset.
+    The caller must set the HF_TOKEN env var (with write/manage-repos scope) first
+    so push_to_hub uploads under that account. Returns the episode count.
     """
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
