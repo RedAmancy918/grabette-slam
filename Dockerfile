@@ -62,7 +62,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 RUN useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user \
-    HF_HOME=/home/user/.cache/huggingface
+    HF_HOME=/home/user/.cache/huggingface \
+    SYSTEM=spaces
+# SYSTEM=spaces lets Gradio's get_space() recognize this Docker Space so it uses
+# the real HF OAuth flow (vars injected by hf_oauth: true) instead of the local mock.
 WORKDIR /home/user/app
 COPY --chown=user app.py pipeline.py /home/user/app/
 
