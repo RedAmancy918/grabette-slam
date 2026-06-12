@@ -56,28 +56,57 @@ class _LineQueueWriter:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             if line.strip():
-                self.q.put(line)
+                self.q.put(("log", line))
         return len(s)
 
     def flush(self):
         if self._buf.strip():
-            self.q.put(self._buf)
+            self.q.put(("log", self._buf))
         self._buf = ""
 
 
-def run(source_repo, target_repo, task,
-        oauth_token: gr.OAuthToken | None):
-    """Stream the pipeline log live.
+def _bar(frac: float, label: str) -> str:
+    """An HTML progress bar updated via yield (coexists with the log textbox —
+    unlike gr.Progress, which overlays the output and makes the UI flip)."""
+    pct = max(0, min(100, int(frac * 100)))
+    return (
+        '<div style="background:#e5e7eb;border-radius:8px;height:24px;width:100%;'
+        'overflow:hidden;font-family:sans-serif">'
+        f'<div style="background:#10b981;height:100%;width:{pct}%;transition:width .3s;'
+        'color:white;font-size:13px;line-height:24px;text-align:center;white-space:nowrap">'
+        f'{pct}% · {label}</div></div>'
+    )
 
-    This is a generator: each yield updates the log textbox. The heavy work runs
-    in a worker thread and all of its output (the log() callback + every print()
-    in the pipeline) is funnelled through a queue, so the user sees progress as
-    it happens instead of one dump at the end.
 
-    Everything goes into the single text stream (no gr.Progress bar — mixing a
-    progress bar with streamed text makes the UI flip between the two). The last
-    line is a live "⏳ <phase> (Ns)" heartbeat, updated in place, so the elapsed
-    counter ticks smoothly during the long, silent download without resetting.
+def _preflight(api, source_repo, target_repo):
+    """Quick access/existence checks. Returns (exists, writable, error_or_None)."""
+    try:
+        api.repo_info(source_repo, repo_type="dataset")
+    except Exception as e:
+        return None, None, f"Cannot access source dataset '{source_repo}': {e}"
+
+    try:
+        me = api.whoami()
+        username = me.get("name")
+        orgs = {o.get("name") for o in me.get("orgs", [])}
+    except Exception:
+        username, orgs = None, set()
+    ns = target_repo.split("/")[0] if "/" in target_repo else username
+    writable = ns is not None and (ns == username or ns in orgs)
+
+    exists = api.repo_exists(target_repo, repo_type="dataset")
+    return exists, writable, None
+
+
+def _run(source_repo, target_repo, task, oauth_token, create_pr):
+    """Streaming generator behind both buttons. Yields a 4-tuple matching
+    [bar (HTML), log (Textbox), summary (Markdown), confirm-PR button (update)].
+
+    A progress bar (gr.HTML, updated via yield — no gr.Progress overlay, so no
+    UI flip) sits alongside the live log. The heavy work runs in a worker thread;
+    its output (log() + every print()) streams through a queue. Pre-flight checks
+    run synchronously up front: source read access, target write access, and
+    target existence — an existing target reveals the "Push as PR" button.
     """
     if oauth_token is None:
         raise gr.Error("Sign in with your Hugging Face account first.")
@@ -85,103 +114,162 @@ def run(source_repo, target_repo, task,
         raise gr.Error("Fill in source repo, target repo and task.")
 
     # OAuth access tokens aren't accepted by huggingface_hub.login() (it expects a
-    # classic token's role). Expose the token via env + pass it explicitly so
-    # snapshot_download and push_to_hub pick it up.
+    # classic token's role). Expose the token via env + pass it explicitly.
     token = oauth_token.token
     os.environ["HF_TOKEN"] = token
 
-    q: "queue.Queue[str | None]" = queue.Queue()
+    logs: list[str] = []
+    start = time.time()
+    frac, label = 0.02, "checking"
+    NOBTN = gr.update()  # leave the confirm button as-is
+
+    def render() -> str:
+        return "\n".join(logs)
+
+    def view(summary="", btn=NOBTN):
+        return _bar(frac, f"{label} · {int(time.time() - start)}s"), render(), summary, btn
+
+    # ---- Pre-flight (synchronous, fast) ---------------------------------
+    logs.append("Checking repo access…")
+    yield view()
+    api = HfApi(token=token)
+    exists, writable, err = _preflight(api, source_repo, target_repo)
+    if err:
+        logs.append(f"❌ {err}")
+        yield _bar(0, "error"), render(), f"### ❌ {err}", gr.update(visible=False)
+        raise gr.Error(err)
+    logs.append("  ✓ source readable")
+
+    do_pr = False
+    if not exists:
+        if not writable:
+            msg = (f"You don't have write access to namespace "
+                   f"'{target_repo.split('/')[0]}' to create '{target_repo}'.")
+            logs.append(f"❌ {msg}")
+            yield _bar(0, "error"), render(), f"### ❌ {msg}", gr.update(visible=False)
+            raise gr.Error(msg)
+        logs.append(f"  ✓ target '{target_repo}' is new and writable")
+    else:
+        if not create_pr:
+            logs.append(f"⚠️ target '{target_repo}' already exists")
+            warn = (
+                f"### ⚠️ Target already exists\n"
+                f"`{target_repo}` already exists on the Hub. To avoid overwriting it, "
+                f"click **Push as PR to existing repo** to open a Pull Request instead.\n\n"
+                f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
+            )
+            frac, label = 0.05, "target exists"
+            yield _bar(frac, "target exists"), render(), warn, gr.update(visible=True)
+            return
+        logs.append(f"  ✓ target '{target_repo}' exists — will open a Pull Request")
+        do_pr = True
+    yield view()
+
+    # ---- Heavy work in a worker thread ----------------------------------
+    q: "queue.Queue[tuple]" = queue.Queue()
     result: dict = {}
     _stop.clear()  # fresh run
+
+    def on_progress(done, total, phase):
+        if phase == "slam":
+            f = 0.30 + 0.55 * (done / total if total else 1.0)
+            lbl = f"SLAM {done}/{total}" if total else "SLAM"
+        elif phase == "build":
+            f, lbl = 0.88, "building dataset"
+        elif phase == "push":
+            f, lbl = 0.95, ("opening PR" if do_pr else "pushing")
+        else:
+            f, lbl = 0.30, phase
+        q.put(("progress", f, lbl))
 
     def worker():
         writer = _LineQueueWriter(q)
         try:
-            # redirect_stdout funnels every print() in the pipeline into the
-            # queue; log=print routes pipeline.py's own log lines through it too.
             with contextlib.redirect_stdout(writer):
+                q.put(("progress", 0.07, "download"))
                 work = Path(tempfile.mkdtemp())
                 try:
-                    info = HfApi().repo_info(source_repo, repo_type="dataset",
-                                             files_metadata=True, token=token)
-                    n_files = len(info.siblings)
+                    info = api.repo_info(source_repo, repo_type="dataset", files_metadata=True)
                     mb = sum((s.size or 0) for s in info.siblings) / 1e6
-                    print(f"Downloading {source_repo} — {n_files} files, {mb:.0f} MB…")
+                    print(f"Downloading {source_repo} — {len(info.siblings)} files, {mb:.0f} MB…")
                 except Exception:
                     print(f"Downloading {source_repo}…")
-
                 raw = snapshot_download(source_repo, repo_type="dataset",
                                         local_dir=work / "raw", token=token)
                 print("Download complete.")
-
-                n = process_dataset(raw, target_repo, task, root=work / "lerobot",
-                                    log=print, should_stop=_stop.is_set)
+                q.put(("progress", 0.30, "converting"))
+                n, pr_url = process_dataset(
+                    raw, target_repo, task, root=work / "lerobot",
+                    log=print, should_stop=_stop.is_set, create_pr=do_pr,
+                    on_progress=on_progress)
                 writer.flush()
-            result["n"] = n
-        except Exception as e:  # surfaced to the UI after the loop
+            result["n"], result["pr_url"] = n, pr_url
+        except Exception as e:
             writer.flush()
             result["error"] = e
         finally:
-            q.put(None)  # sentinel: worker finished
+            q.put(("done",))
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
-    logs: list[str] = []
-    last_msg = "Starting…"
-    start = time.time()
-
-    def render(tail: str | None = None) -> str:
-        body = "\n".join(logs)
-        if tail:
-            body = f"{body}\n{tail}" if body else tail
-        return body
-
-    def beat() -> str:
-        return f"⏳ {last_msg[:70]}  ({int(time.time() - start)}s)"
-
-    yield render("⏳ Starting…"), ""
-
     while True:
         try:
-            msg = q.get(timeout=1.0)
+            item = q.get(timeout=1.0)
         except queue.Empty:
-            # No new line for a while (e.g. mid-download): tick the heartbeat in
-            # place so the elapsed counter advances without resetting.
-            yield render(beat()), ""
+            yield view()  # tick the elapsed counter even when nothing new arrives
             continue
-        if msg is None:
+        tag = item[0]
+        if tag == "done":
             break
-        logs.append(msg)
-        last_msg = msg
-        yield render(beat()), ""
+        if tag == "progress":
+            frac, label = item[1], item[2]
+        else:  # ("log", line)
+            logs.append(item[1])
+        yield view()
 
     t.join()
     if "error" in result:
-        yield render(), f"### ❌ Failed\n```\n{result['error']}\n```"
-        raise gr.Error(f"Pipeline failed: {result['error']}")
+        err = result["error"]
+        yield _bar(frac, "failed"), render(), f"### ❌ Failed\n```\n{err}\n```", gr.update(visible=False)
+        raise gr.Error(f"Pipeline failed: {err}")
 
     n = result["n"]
+    pr_url = result.get("pr_url")
     ds_url = f"https://huggingface.co/datasets/{target_repo}"
-    viz_url = _visualizer_url(target_repo)
-    logs.append(f"✅ Pushed {n} episode(s).")
+    logs.append(f"✅ Done — {n} episode(s).")
+    if pr_url:
+        summary = (
+            f"### ✅ Done — {n} episode(s) — Pull Request opened\n"
+            f"- **PR:** 👉 [{pr_url}]({pr_url}) 👈\n"
+            f"- **Target:** [{target_repo}]({ds_url})\n"
+        )
+    else:
+        viz_url = _visualizer_url(target_repo)
+        # The LeRobot visualizer sends X-Frame-Options: deny, so link out.
+        summary = (
+            f"### ✅ Done — {n} episode(s)\n"
+            f"- **Dataset:** [{target_repo}]({ds_url})\n"
+            f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
+            f"_(The visualizer needs the dataset to be public.)_"
+        )
+    frac, label = 1.0, "done"
+    yield _bar(1.0, "done"), render(), summary, gr.update(visible=False)
 
-    # The LeRobot visualizer sends X-Frame-Options: deny, so it can't be embedded
-    # in an iframe — link out (opens in a new tab) instead.
-    summary = (
-        f"### ✅ Done — {n} episode(s)\n"
-        f"- **Dataset:** [{target_repo}]({ds_url})\n"
-        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
-        f"_(The visualizer needs the dataset to be public.)_"
-    )
-    yield render(), summary
+
+def run_pipeline(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
+    yield from _run(source_repo, target_repo, task, oauth_token, create_pr=False)
+
+
+def run_pipeline_pr(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
+    yield from _run(source_repo, target_repo, task, oauth_token, create_pr=True)
 
 
 with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     gr.Markdown(
-        "# 🤖 Grabette SLAM → LeRobot\n"
+        "# Grabette post-processing\n"
         "Convert a raw OAK-D dataset from the Hub into a LeRobot dataset and push "
-        "it back to the Hub. Each episode is converted, run through SLAM, assembled "
+        "it back to the Hub. Each episode is checked, converted, run through SLAM, assembled "
         "into LeRobot v3 format, then uploaded."
     )
     gr.LoginButton()
@@ -193,15 +281,22 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     with gr.Row():
         btn = gr.Button("Run pipeline", variant="primary")
         stop_btn = gr.Button("Stop", variant="stop")
+    # Revealed only when the target dataset already exists (see _run).
+    confirm_pr_btn = gr.Button("Push as PR to existing repo", variant="secondary",
+                               visible=False)
 
+    bar = gr.HTML()
     log_out = gr.Textbox(label="Log", lines=20, max_lines=20, autoscroll=True)
     summary_out = gr.Markdown()
 
-    run_event = btn.click(run, inputs=[source, target, task],
-                          outputs=[log_out, summary_out])
-    # Stop: cancel the streaming generator (frees the UI at once) and signal the
-    # worker thread to abandon the run (skip remaining episodes + the push).
-    stop_btn.click(_request_stop, inputs=None, outputs=None, cancels=[run_event])
+    outputs = [bar, log_out, summary_out, confirm_pr_btn]
+    run_event = btn.click(run_pipeline, inputs=[source, target, task], outputs=outputs)
+    pr_event = confirm_pr_btn.click(run_pipeline_pr, inputs=[source, target, task],
+                                    outputs=outputs)
+    # Stop: cancel whichever generator is streaming (frees the UI at once) and
+    # signal the worker to abandon the run (skip remaining episodes + the push).
+    stop_btn.click(_request_stop, inputs=None, outputs=None,
+                   cancels=[run_event, pr_event])
 
 
 if __name__ == "__main__":

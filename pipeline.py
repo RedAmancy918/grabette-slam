@@ -67,7 +67,7 @@ def _process_episode(ep: Path) -> tuple[Path | None, list[str]]:
     return ep, lines
 
 
-def run_slam(dataset_dir, log=print, should_stop=None) -> list[Path]:
+def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list[Path]:
     """Convert + SLAM every episode in parallel. Returns dirs that produced a trajectory.
 
     Episodes are independent (each reads/writes only its own dir), so they run
@@ -78,14 +78,19 @@ def run_slam(dataset_dir, log=print, should_stop=None) -> list[Path]:
     should_stop: optional no-arg predicate; when it returns True the loop stops
     collecting results and cancels not-yet-started episodes (a running SLAM
     finishes on its own — a subprocess can't be interrupted mid-call).
+    on_progress: optional callback(done, total, "slam") fired per finished episode.
     """
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
         raise ValueError(f"No episodes (oakd_left.mp4) found under {dataset_dir}")
 
-    log(f"Found {len(episodes)} episode(s)")
-    workers = min(len(episodes), os.cpu_count() or 2)
+    total = len(episodes)
+    log(f"Found {total} episode(s)")
+    if on_progress:
+        on_progress(0, total, "slam")
+    workers = min(total, os.cpu_count() or 2)
     processed = []
+    done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_process_episode, ep) for ep in episodes]
         for fut in as_completed(futures):
@@ -98,30 +103,56 @@ def run_slam(dataset_dir, log=print, should_stop=None) -> list[Path]:
                 log(line)
             if ep is not None:
                 processed.append(ep)
+            done += 1
+            if on_progress:
+                on_progress(done, total, "slam")
     return sorted(processed)
 
 
-def process_dataset(dataset_dir, target_repo, task, root, log=print, should_stop=None) -> int:
-    """Convert + SLAM + build a LeRobot dataset + push it to the Hub.
+def process_dataset(dataset_dir, target_repo, task, root, log=print,
+                    should_stop=None, create_pr=False, on_progress=None) -> tuple[int, str | None]:
+    """Convert + SLAM + build a LeRobot dataset, then push it (or open a PR).
 
     The caller must set the HF_TOKEN env var (with write/manage-repos scope) first
-    so push_to_hub uploads under that account. Returns the episode count.
+    so the upload runs under that account.
 
+    create_pr: if True, upload the built dataset as a Pull Request on an existing
+        target repo (HfApi.upload_folder(create_pr=True)) instead of committing to
+        main via push_to_hub.
     should_stop: optional no-arg predicate; checked before the (irreversible)
-    build + push so a stop request never publishes a partial dataset.
+        build + push so a stop request never publishes a partial dataset.
+    on_progress: optional callback(done, total, phase) for UI progress.
+
+    Returns (episode_count, pr_url_or_None).
     """
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from huggingface_hub import HfApi
 
-    processed = run_slam(dataset_dir, log=log, should_stop=should_stop)
+    processed = run_slam(dataset_dir, log=log, should_stop=should_stop, on_progress=on_progress)
     if should_stop and should_stop():
         raise RuntimeError("Stopped by user — nothing pushed.")
     if not processed:
         raise RuntimeError("No episode produced a trajectory; nothing to push.")
 
+    if on_progress:
+        on_progress(0, 0, "build")
     log(f"Building LeRobot dataset from {len(processed)} episode(s)…")
     build_dataset(repo_id=target_repo, episode_dirs=processed, task=task, root=Path(root))
+    ds = LeRobotDataset(target_repo, root=Path(root))
+
+    if on_progress:
+        on_progress(0, 0, "push")
+    if create_pr:
+        log(f"Opening a Pull Request on {target_repo} …")
+        info = HfApi().upload_folder(
+            repo_id=target_repo, repo_type="dataset", folder_path=str(ds.root),
+            ignore_patterns=["images/"], create_pr=True,
+            commit_message=f"Add grabette SLAM dataset: {task}",
+        )
+        pr_url = getattr(info, "pr_url", None)
+        log(f"✅ PR opened: {pr_url}")
+        return len(processed), pr_url
 
     log(f"Pushing to https://huggingface.co/datasets/{target_repo} …")
-    ds = LeRobotDataset(target_repo, root=Path(root))
     ds.push_to_hub(tags=["lerobot", "grabette"])
-    return len(processed)
+    return len(processed), None
