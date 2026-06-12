@@ -20,6 +20,21 @@ from pipeline import process_dataset
 
 VISUALIZER = "https://huggingface.co/spaces/lerobot/visualize_dataset"
 
+# Cooperative stop flag, shared between the run() worker and the Stop button.
+# The Space processes one run at a time, so a module-level flag is enough.
+_stop = threading.Event()
+
+
+def _request_stop():
+    """Stop button handler: signal the worker to abandon the current run.
+
+    Gradio's cancels= stops the streaming generator immediately; this flag makes
+    the background worker actually stop (skip remaining episodes, skip the push).
+    In-flight blocking calls (a running download, one SLAM subprocess) finish on
+    their own, but nothing further is started and nothing is pushed.
+    """
+    _stop.set()
+
 
 def _visualizer_url(repo_id: str) -> str:
     return f"{VISUALIZER}?dataset={repo_id}&episode=0"
@@ -51,14 +66,18 @@ class _LineQueueWriter:
 
 
 def run(source_repo, target_repo, task,
-        oauth_token: gr.OAuthToken | None, progress=gr.Progress()):
+        oauth_token: gr.OAuthToken | None):
     """Stream the pipeline log live.
 
-    This is a generator: each yield updates the UI. The heavy work runs in a
-    worker thread and all of its output (the log() callback + every print() in
-    the pipeline) is funnelled through a queue, so the user sees progress as it
-    happens instead of one dump at the end. A heartbeat keeps the UI moving
-    during the long, silent download.
+    This is a generator: each yield updates the log textbox. The heavy work runs
+    in a worker thread and all of its output (the log() callback + every print()
+    in the pipeline) is funnelled through a queue, so the user sees progress as
+    it happens instead of one dump at the end.
+
+    Everything goes into the single text stream (no gr.Progress bar — mixing a
+    progress bar with streamed text makes the UI flip between the two). The last
+    line is a live "⏳ <phase> (Ns)" heartbeat, updated in place, so the elapsed
+    counter ticks smoothly during the long, silent download without resetting.
     """
     if oauth_token is None:
         raise gr.Error("Sign in with your Hugging Face account first.")
@@ -73,6 +92,7 @@ def run(source_repo, target_repo, task,
 
     q: "queue.Queue[str | None]" = queue.Queue()
     result: dict = {}
+    _stop.clear()  # fresh run
 
     def worker():
         writer = _LineQueueWriter(q)
@@ -94,8 +114,8 @@ def run(source_repo, target_repo, task,
                                         local_dir=work / "raw", token=token)
                 print("Download complete.")
 
-                n = process_dataset(raw, target_repo, task,
-                                    root=work / "lerobot", log=print)
+                n = process_dataset(raw, target_repo, task, root=work / "lerobot",
+                                    log=print, should_stop=_stop.is_set)
                 writer.flush()
             result["n"] = n
         except Exception as e:  # surfaced to the UI after the loop
@@ -110,29 +130,35 @@ def run(source_repo, target_repo, task,
     logs: list[str] = []
     last_msg = "Starting…"
     start = time.time()
-    frac = 0.03
-    progress(frac, desc=last_msg)
-    yield "Starting…", ""
+
+    def render(tail: str | None = None) -> str:
+        body = "\n".join(logs)
+        if tail:
+            body = f"{body}\n{tail}" if body else tail
+        return body
+
+    def beat() -> str:
+        return f"⏳ {last_msg[:70]}  ({int(time.time() - start)}s)"
+
+    yield render("⏳ Starting…"), ""
 
     while True:
         try:
-            msg = q.get(timeout=2.0)
+            msg = q.get(timeout=1.0)
         except queue.Empty:
-            # No new line for a while (e.g. mid-download): keep the UI alive.
-            progress(min(frac, 0.95), desc=f"{last_msg[:60]}  ({int(time.time()-start)}s)")
-            yield "\n".join(logs), ""
+            # No new line for a while (e.g. mid-download): tick the heartbeat in
+            # place so the elapsed counter advances without resetting.
+            yield render(beat()), ""
             continue
         if msg is None:
             break
         logs.append(msg)
         last_msg = msg
-        frac = min(0.9, frac + 0.01)
-        progress(frac, desc=msg[:80])
-        yield "\n".join(logs), ""
+        yield render(beat()), ""
 
     t.join()
     if "error" in result:
-        yield "\n".join(logs), f"### ❌ Failed\n```\n{result['error']}\n```"
+        yield render(), f"### ❌ Failed\n```\n{result['error']}\n```"
         raise gr.Error(f"Pipeline failed: {result['error']}")
 
     n = result["n"]
@@ -148,8 +174,7 @@ def run(source_repo, target_repo, task,
         f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
         f"_(The visualizer needs the dataset to be public.)_"
     )
-    progress(1.0, desc="Done")
-    yield "\n".join(logs), summary
+    yield render(), summary
 
 
 with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
@@ -165,14 +190,21 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     target = gr.Textbox(label="Target dataset (repo_id to create)",
                         placeholder="your-account/grabette-demo")
     task = gr.Textbox(label="Task description", placeholder="cup manipulation")
-    btn = gr.Button("Run pipeline", variant="primary")
+    with gr.Row():
+        btn = gr.Button("Run pipeline", variant="primary")
+        stop_btn = gr.Button("Stop", variant="stop")
 
     log_out = gr.Textbox(label="Log", lines=20, max_lines=20, autoscroll=True)
     summary_out = gr.Markdown()
 
-    btn.click(run, inputs=[source, target, task],
-              outputs=[log_out, summary_out])
+    run_event = btn.click(run, inputs=[source, target, task],
+                          outputs=[log_out, summary_out])
+    # Stop: cancel the streaming generator (frees the UI at once) and signal the
+    # worker thread to abandon the run (skip remaining episodes + the push).
+    stop_btn.click(_request_stop, inputs=None, outputs=None, cancels=[run_event])
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # queue() is required for streaming generators and for the Stop button's
+    # cancels=[] to take effect.
+    demo.queue().launch(server_name="0.0.0.0", server_port=7860)

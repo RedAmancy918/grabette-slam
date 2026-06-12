@@ -67,13 +67,17 @@ def _process_episode(ep: Path) -> tuple[Path | None, list[str]]:
     return ep, lines
 
 
-def run_slam(dataset_dir, log=print) -> list[Path]:
+def run_slam(dataset_dir, log=print, should_stop=None) -> list[Path]:
     """Convert + SLAM every episode in parallel. Returns dirs that produced a trajectory.
 
     Episodes are independent (each reads/writes only its own dir), so they run
     concurrently. SLAM is a single-threaded CPU-bound subprocess, so workers are
     capped at the core count; processing whole episodes per worker also overlaps
     one episode's convert with another's SLAM for free.
+
+    should_stop: optional no-arg predicate; when it returns True the loop stops
+    collecting results and cancels not-yet-started episodes (a running SLAM
+    finishes on its own — a subprocess can't be interrupted mid-call).
     """
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
@@ -85,6 +89,10 @@ def run_slam(dataset_dir, log=print) -> list[Path]:
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_process_episode, ep) for ep in episodes]
         for fut in as_completed(futures):
+            if should_stop and should_stop():
+                log("⛔ Stop requested — abandoning remaining episodes")
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
             ep, lines = fut.result()
             for line in lines:
                 log(line)
@@ -93,15 +101,20 @@ def run_slam(dataset_dir, log=print) -> list[Path]:
     return sorted(processed)
 
 
-def process_dataset(dataset_dir, target_repo, task, root, log=print) -> int:
+def process_dataset(dataset_dir, target_repo, task, root, log=print, should_stop=None) -> int:
     """Convert + SLAM + build a LeRobot dataset + push it to the Hub.
 
     The caller must set the HF_TOKEN env var (with write/manage-repos scope) first
     so push_to_hub uploads under that account. Returns the episode count.
+
+    should_stop: optional no-arg predicate; checked before the (irreversible)
+    build + push so a stop request never publishes a partial dataset.
     """
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    processed = run_slam(dataset_dir, log=log)
+    processed = run_slam(dataset_dir, log=log, should_stop=should_stop)
+    if should_stop and should_stop():
+        raise RuntimeError("Stopped by user — nothing pushed.")
     if not processed:
         raise RuntimeError("No episode produced a trajectory; nothing to push.")
 
