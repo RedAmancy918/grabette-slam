@@ -294,7 +294,7 @@ CSS = """
 footer {display: none !important;}
 """
 
-with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_height=True) as demo:
+with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     gr.HTML(
         "<div id='app-header'><h1>🤖 Grabette post-processing</h1>"
         "<p>Raw OAK-D recording → SLAM → LeRobot dataset on the Hub</p></div>"
@@ -318,7 +318,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_hei
         with gr.Column(scale=3, min_width=280):
             bar = gr.HTML(_bar(0, "ready"))
             log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
-                                 elem_id="logbox", show_copy_button=True)
+                                 elem_id="logbox")
             summary_out = gr.Markdown()
 
     outputs = [bar, log_out, summary_out, confirm_pr_btn]
@@ -333,5 +333,6 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_hei
 
 if __name__ == "__main__":
     # queue() is required for streaming generators and for the Stop button's
-    # cancels=[] to take effect.
-    demo.queue().launch(server_name="0.0.0.0", server_port=7860)
+    # cancels=[] to take effect. theme/css moved to launch() in Gradio 6.0.
+    demo.queue().launch(theme=THEME, css=CSS,
+                        server_name="0.0.0.0", server_port=7860)
