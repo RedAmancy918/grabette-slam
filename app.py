@@ -201,7 +201,7 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
                 n, pr_url = process_dataset(
                     raw, target_repo, task, root=work / "lerobot",
                     log=print, should_stop=_stop.is_set, create_pr=do_pr,
-                    on_progress=on_progress)
+                    on_progress=on_progress, token=token)
                 writer.flush()
             result["n"], result["pr_url"] = n, pr_url
         except Exception as e:

@@ -110,23 +110,30 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
 
 
 def process_dataset(dataset_dir, target_repo, task, root, log=print,
-                    should_stop=None, create_pr=False, on_progress=None) -> tuple[int, str | None]:
+                    should_stop=None, create_pr=False, on_progress=None,
+                    token=None) -> tuple[int, str | None]:
     """Convert + SLAM + build a LeRobot dataset, then push it (or open a PR).
 
-    The caller must set the HF_TOKEN env var (with write/manage-repos scope) first
-    so the upload runs under that account.
+    token: HF token used for the upload. Also exported as HF_TOKEN (so the
+        push_to_hub path, which builds its own HfApi internally, picks it up).
 
     create_pr: if True, upload the built dataset as a Pull Request on an existing
         target repo (HfApi.upload_folder(create_pr=True)) instead of committing to
-        main via push_to_hub.
+        main via push_to_hub. Opening a PR needs write access to the repo — a
+        read-only token returns 403.
     should_stop: optional no-arg predicate; checked before the (irreversible)
         build + push so a stop request never publishes a partial dataset.
     on_progress: optional callback(done, total, phase) for UI progress.
 
     Returns (episode_count, pr_url_or_None).
     """
+    import os
+
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from huggingface_hub import HfApi
+
+    if token:
+        os.environ["HF_TOKEN"] = token  # picked up by push_to_hub's internal HfApi
 
     processed = run_slam(dataset_dir, log=log, should_stop=should_stop, on_progress=on_progress)
     if should_stop and should_stop():
@@ -144,11 +151,18 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
         on_progress(0, 0, "push")
     if create_pr:
         log(f"Opening a Pull Request on {target_repo} …")
-        info = HfApi().upload_folder(
-            repo_id=target_repo, repo_type="dataset", folder_path=str(ds.root),
-            ignore_patterns=["images/"], create_pr=True,
-            commit_message=f"Add grabette SLAM dataset: {task}",
-        )
+        try:
+            info = HfApi(token=token).upload_folder(
+                repo_id=target_repo, repo_type="dataset", folder_path=str(ds.root),
+                ignore_patterns=["images/"], create_pr=True,
+                commit_message=f"Add grabette SLAM dataset: {task}",
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not open a PR on {target_repo} (HF said: {e}). Opening a PR "
+                f"needs write access — sign out and back in to grant the Space "
+                f"write-repos scope, or check you can write to that repo."
+            ) from e
         pr_url = getattr(info, "pr_url", None)
         log(f"✅ PR opened: {pr_url}")
         return len(processed), pr_url
