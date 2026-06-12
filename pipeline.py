@@ -110,30 +110,29 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
 
 
 def process_dataset(dataset_dir, target_repo, task, root, log=print,
-                    should_stop=None, create_pr=False, on_progress=None,
+                    should_stop=None, to_branch=False, on_progress=None,
                     token=None) -> tuple[int, str | None, str]:
-    """Convert + SLAM + build a LeRobot dataset, then push it (or open a PR).
+    """Convert + SLAM + build a LeRobot dataset, then push it to the Hub.
 
-    token: HF token used for the upload. Also exported as HF_TOKEN (so the
-        push_to_hub path, which builds its own HfApi internally, picks it up).
+    token: HF token used for the upload. Also exported as HF_TOKEN (so
+        push_to_hub, which builds its own HfApi internally, picks it up).
 
-    create_pr: if True, upload the built dataset as a Pull Request on an existing
-        target repo (HfApi.upload_folder(create_pr=True)) instead of committing to
-        main via push_to_hub. Opening a PR needs write access to the repo — a
-        read-only token returns 403.
+    to_branch: if True, push to a dedicated branch instead of main (used when the
+        target repo already exists, to leave main untouched). We push to a branch
+        rather than opening a PR because HF "Sign in with HF" OAuth tokens can
+        write content but are not allowed to open PRs (that needs the separate
+        discussions/PR permission), so create_pr=True always 403s here.
     should_stop: optional no-arg predicate; checked before the (irreversible)
         build + push so a stop request never publishes a partial dataset.
     on_progress: optional callback(done, total, phase) for UI progress.
 
-    Returns (episode_count, link_or_None, mode) where mode is one of
-    "main" (pushed to main), "pr" (Pull Request opened), or "branch" (pushed to
-    a branch as a PR fallback). link is the PR/branch URL when relevant.
+    Returns (episode_count, link_or_None, mode) where mode is "main" (pushed to
+    main, link None) or "branch" (pushed to a branch, link = branch URL).
     """
     import os
     import re
 
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    from huggingface_hub import HfApi
 
     if token:
         os.environ["HF_TOKEN"] = token  # picked up by push_to_hub's internal HfApi
@@ -152,35 +151,18 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
 
     if on_progress:
         on_progress(0, 0, "push")
-    if create_pr:
-        # 1) Try a real PR. HF OAuth ("Sign in with HF") tokens are often refused
-        #    by the PR/discussion endpoint even with write-repos, so this may 403.
-        try:
-            log(f"Opening a Pull Request on {target_repo} …")
-            info = HfApi(token=token).upload_folder(
-                repo_id=target_repo, repo_type="dataset", folder_path=str(ds.root),
-                ignore_patterns=["images/"], create_pr=True,
-                commit_message=f"Add grabette SLAM dataset: {task}",
-            )
-            pr_url = getattr(info, "pr_url", None)
-            log(f"✅ PR opened: {pr_url}")
-            return len(processed), pr_url, "pr"
-        except Exception as e:
-            log(f"  PR rejected ({e}); falling back to pushing a branch…")
-
-        # 2) Fallback: push to a dedicated branch (a plain commit — write-repos
-        #    allows this even when opening a PR directly is not permitted).
+    if to_branch:
+        # Push to a dedicated branch, leaving main untouched. tag_version=False:
+        # don't create the repo-global "v3.0" tag when only adding a branch.
         slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:40] or "update"
         branch = f"grabette-{slug}"
+        log(f"Pushing to branch '{branch}' on {target_repo} …")
         try:
-            # tag_version=False: don't create the repo-global "v3.0" version tag
-            # when we're only proposing a branch on someone's existing repo.
             ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"], tag_version=False)
         except Exception as e:
             raise RuntimeError(
                 f"Could not write to {target_repo} (HF said: {e}). Your sign-in token "
-                f"appears read-only — re-login to grant write-repos, or run the Space "
-                f"with a write token."
+                f"appears read-only — re-login to grant the Space write-repos scope."
             ) from e
         branch_url = f"https://huggingface.co/datasets/{target_repo}/tree/{branch}"
         log(f"✅ Pushed to branch '{branch}'.")

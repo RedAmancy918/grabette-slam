@@ -104,15 +104,15 @@ def _preflight(api, source_repo, target_repo):
     return exists, writable, None
 
 
-def _run(source_repo, target_repo, task, oauth_token, create_pr):
+def _run(source_repo, target_repo, task, oauth_token, to_branch):
     """Streaming generator behind both buttons. Yields a 4-tuple matching
-    [bar (HTML), log (Textbox), summary (Markdown), confirm-PR button (update)].
+    [bar (HTML), log (Textbox), summary (Markdown), branch button (update)].
 
     A progress bar (gr.HTML, updated via yield — no gr.Progress overlay, so no
     UI flip) sits alongside the live log. The heavy work runs in a worker thread;
     its output (log() + every print()) streams through a queue. Pre-flight checks
     run synchronously up front: source read access, target write access, and
-    target existence — an existing target reveals the "Push as PR" button.
+    target existence — an existing target reveals the "push to a branch" button.
     """
     if oauth_token is None:
         raise gr.Error("Sign in with your Hugging Face account first.")
@@ -146,7 +146,6 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
         raise gr.Error(err)
     logs.append("  ✓ source readable")
 
-    do_pr = False
     if not exists:
         if not writable:
             msg = (f"You don't have write access to namespace "
@@ -155,21 +154,20 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
             yield _bar(0, "error"), render(), f"### ❌ {msg}", gr.update(visible=False)
             raise gr.Error(msg)
         logs.append(f"  ✓ target '{target_repo}' is new and writable")
+    elif not to_branch:
+        logs.append(f"⚠️ target '{target_repo}' already exists")
+        warn = (
+            f"### ⚠️ Target already exists\n"
+            f"`{target_repo}` already exists on the Hub. To avoid overwriting it, "
+            f"click **Push to a new branch** — your result lands on a `grabette-…` "
+            f"branch and `main` is left untouched.\n\n"
+            f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
+        )
+        frac, label = 0.05, "target exists"
+        yield _bar(frac, "target exists"), render(), warn, gr.update(visible=True)
+        return
     else:
-        if not create_pr:
-            logs.append(f"⚠️ target '{target_repo}' already exists")
-            warn = (
-                f"### ⚠️ Target already exists\n"
-                f"`{target_repo}` already exists on the Hub. To avoid overwriting it, "
-                f"click **Push as PR to existing repo** — it opens a Pull Request, or "
-                f"pushes to a dedicated branch if your sign-in token can't open PRs.\n\n"
-                f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
-            )
-            frac, label = 0.05, "target exists"
-            yield _bar(frac, "target exists"), render(), warn, gr.update(visible=True)
-            return
-        logs.append(f"  ✓ target '{target_repo}' exists — will open a Pull Request")
-        do_pr = True
+        logs.append(f"  ✓ target '{target_repo}' exists — will push to a branch")
     yield view()
 
     # ---- Heavy work in a worker thread ----------------------------------
@@ -184,7 +182,7 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
         elif phase == "build":
             f, lbl = 0.88, "building dataset"
         elif phase == "push":
-            f, lbl = 0.95, ("opening PR" if do_pr else "pushing")
+            f, lbl = 0.95, ("pushing branch" if to_branch else "pushing")
         else:
             f, lbl = 0.30, phase
         q.put(("progress", f, lbl))
@@ -207,7 +205,7 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
                 q.put(("progress", 0.30, "converting"))
                 n, link, mode = process_dataset(
                     raw, target_repo, task, root=work / "lerobot",
-                    log=print, should_stop=_stop.is_set, create_pr=do_pr,
+                    log=print, should_stop=_stop.is_set, to_branch=to_branch,
                     on_progress=on_progress, token=token)
                 writer.flush()
             result["n"], result["link"], result["mode"] = n, link, mode
@@ -246,20 +244,14 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
     mode = result.get("mode")
     ds_url = f"https://huggingface.co/datasets/{target_repo}"
     logs.append(f"✅ Done — {n} episode(s).")
-    if mode == "pr":
-        summary = (
-            f"### ✅ Done — {n} episode(s) — Pull Request opened\n"
-            f"- **PR:** 👉 [{link}]({link}) 👈\n"
-            f"- **Target:** [{target_repo}]({ds_url})\n"
-        )
-    elif mode == "branch":
-        new_pr_url = f"{ds_url}/discussions/new"
+    if mode == "branch":
         summary = (
             f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
-            f"_(Opening a PR directly isn't allowed with a sign-in token, so the "
-            f"result was pushed to a branch instead.)_\n"
+            f"_(A sign-in token can't open a PR — that needs the discussions/PR "
+            f"permission — so the result was pushed to a branch, leaving `main` "
+            f"untouched.)_\n"
             f"- **Branch:** 👉 [{link}]({link}) 👈\n"
-            f"- **Open a PR from it:** [{new_pr_url}]({new_pr_url})\n"
+            f"- Review it there, then merge the branch into `main` (git / API) when ready.\n"
         )
     else:
         viz_url = _visualizer_url(target_repo)
@@ -275,11 +267,11 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
 
 
 def run_pipeline(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, create_pr=False)
+    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=False)
 
 
-def run_pipeline_pr(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, create_pr=True)
+def run_pipeline_branch(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
+    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=True)
 
 
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
@@ -312,8 +304,8 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                 btn = gr.Button("▶  Run", variant="primary", scale=3)
                 stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
             # Revealed only when the target dataset already exists (see _run).
-            confirm_pr_btn = gr.Button("Push as PR to existing repo",
-                                       variant="secondary", size="sm", visible=False)
+            confirm_branch_btn = gr.Button("Push to a new branch",
+                                           variant="secondary", size="sm", visible=False)
         # ---- Outputs (right) ----
         with gr.Column(scale=3, min_width=280):
             bar = gr.HTML(_bar(0, "ready"))
@@ -321,14 +313,14 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                  elem_id="logbox")
             summary_out = gr.Markdown()
 
-    outputs = [bar, log_out, summary_out, confirm_pr_btn]
+    outputs = [bar, log_out, summary_out, confirm_branch_btn]
     run_event = btn.click(run_pipeline, inputs=[source, target, task], outputs=outputs)
-    pr_event = confirm_pr_btn.click(run_pipeline_pr, inputs=[source, target, task],
-                                    outputs=outputs)
+    branch_event = confirm_branch_btn.click(run_pipeline_branch, inputs=[source, target, task],
+                                            outputs=outputs)
     # Stop: cancel whichever generator is streaming (frees the UI at once) and
     # signal the worker to abandon the run (skip remaining episodes + the push).
     stop_btn.click(_request_stop, inputs=None, outputs=None,
-                   cancels=[run_event, pr_event])
+                   cancels=[run_event, branch_event])
 
 
 if __name__ == "__main__":
