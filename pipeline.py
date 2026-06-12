@@ -173,7 +173,9 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
         slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:40] or "update"
         branch = f"grabette-{slug}"
         try:
-            ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"])
+            # tag_version=False: don't create the repo-global "v3.0" version tag
+            # when we're only proposing a branch on someone's existing repo.
+            ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"], tag_version=False)
         except Exception as e:
             raise RuntimeError(
                 f"Could not write to {target_repo} (HF said: {e}). Your sign-in token "
