@@ -111,7 +111,7 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
 
 def process_dataset(dataset_dir, target_repo, task, root, log=print,
                     should_stop=None, create_pr=False, on_progress=None,
-                    token=None) -> tuple[int, str | None]:
+                    token=None) -> tuple[int, str | None, str]:
     """Convert + SLAM + build a LeRobot dataset, then push it (or open a PR).
 
     token: HF token used for the upload. Also exported as HF_TOKEN (so the
@@ -125,9 +125,12 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
         build + push so a stop request never publishes a partial dataset.
     on_progress: optional callback(done, total, phase) for UI progress.
 
-    Returns (episode_count, pr_url_or_None).
+    Returns (episode_count, link_or_None, mode) where mode is one of
+    "main" (pushed to main), "pr" (Pull Request opened), or "branch" (pushed to
+    a branch as a PR fallback). link is the PR/branch URL when relevant.
     """
     import os
+    import re
 
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from huggingface_hub import HfApi
@@ -150,23 +153,37 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
     if on_progress:
         on_progress(0, 0, "push")
     if create_pr:
-        log(f"Opening a Pull Request on {target_repo} …")
+        # 1) Try a real PR. HF OAuth ("Sign in with HF") tokens are often refused
+        #    by the PR/discussion endpoint even with write-repos, so this may 403.
         try:
+            log(f"Opening a Pull Request on {target_repo} …")
             info = HfApi(token=token).upload_folder(
                 repo_id=target_repo, repo_type="dataset", folder_path=str(ds.root),
                 ignore_patterns=["images/"], create_pr=True,
                 commit_message=f"Add grabette SLAM dataset: {task}",
             )
+            pr_url = getattr(info, "pr_url", None)
+            log(f"✅ PR opened: {pr_url}")
+            return len(processed), pr_url, "pr"
+        except Exception as e:
+            log(f"  PR rejected ({e}); falling back to pushing a branch…")
+
+        # 2) Fallback: push to a dedicated branch (a plain commit — write-repos
+        #    allows this even when opening a PR directly is not permitted).
+        slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:40] or "update"
+        branch = f"grabette-{slug}"
+        try:
+            ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"])
         except Exception as e:
             raise RuntimeError(
-                f"Could not open a PR on {target_repo} (HF said: {e}). Opening a PR "
-                f"needs write access — sign out and back in to grant the Space "
-                f"write-repos scope, or check you can write to that repo."
+                f"Could not write to {target_repo} (HF said: {e}). Your sign-in token "
+                f"appears read-only — re-login to grant write-repos, or run the Space "
+                f"with a write token."
             ) from e
-        pr_url = getattr(info, "pr_url", None)
-        log(f"✅ PR opened: {pr_url}")
-        return len(processed), pr_url
+        branch_url = f"https://huggingface.co/datasets/{target_repo}/tree/{branch}"
+        log(f"✅ Pushed to branch '{branch}'.")
+        return len(processed), branch_url, "branch"
 
     log(f"Pushing to https://huggingface.co/datasets/{target_repo} …")
     ds.push_to_hub(tags=["lerobot", "grabette"])
-    return len(processed), None
+    return len(processed), None, "main"

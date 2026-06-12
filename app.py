@@ -67,13 +67,19 @@ class _LineQueueWriter:
 
 def _bar(frac: float, label: str) -> str:
     """An HTML progress bar updated via yield (coexists with the log textbox —
-    unlike gr.Progress, which overlays the output and makes the UI flip)."""
+    unlike gr.Progress, which overlays the output and makes the UI flip).
+
+    The fill sits behind a centered, always-visible label (readable at 0% too).
+    """
     pct = max(0, min(100, int(frac * 100)))
     return (
-        '<div style="background:#e5e7eb;border-radius:8px;height:24px;width:100%;'
-        'overflow:hidden;font-family:sans-serif">'
-        f'<div style="background:#10b981;height:100%;width:{pct}%;transition:width .3s;'
-        'color:white;font-size:13px;line-height:24px;text-align:center;white-space:nowrap">'
+        '<div style="position:relative;height:28px;width:100%;border-radius:8px;'
+        'overflow:hidden;background:var(--neutral-200,#e5e7eb);'
+        'font-family:var(--font,sans-serif)">'
+        f'<div style="position:absolute;inset:0 auto 0 0;width:{pct}%;'
+        'background:linear-gradient(90deg,#34d399,#10b981);transition:width .35s ease"></div>'
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;'
+        'justify-content:center;font-size:13px;font-weight:600;color:#0f172a">'
         f'{pct}% · {label}</div></div>'
     )
 
@@ -155,7 +161,8 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
             warn = (
                 f"### ⚠️ Target already exists\n"
                 f"`{target_repo}` already exists on the Hub. To avoid overwriting it, "
-                f"click **Push as PR to existing repo** to open a Pull Request instead.\n\n"
+                f"click **Push as PR to existing repo** — it opens a Pull Request, or "
+                f"pushes to a dedicated branch if your sign-in token can't open PRs.\n\n"
                 f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
             )
             frac, label = 0.05, "target exists"
@@ -198,12 +205,12 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
                                         local_dir=work / "raw", token=token)
                 print("Download complete.")
                 q.put(("progress", 0.30, "converting"))
-                n, pr_url = process_dataset(
+                n, link, mode = process_dataset(
                     raw, target_repo, task, root=work / "lerobot",
                     log=print, should_stop=_stop.is_set, create_pr=do_pr,
                     on_progress=on_progress, token=token)
                 writer.flush()
-            result["n"], result["pr_url"] = n, pr_url
+            result["n"], result["link"], result["mode"] = n, link, mode
         except Exception as e:
             writer.flush()
             result["error"] = e
@@ -235,14 +242,24 @@ def _run(source_repo, target_repo, task, oauth_token, create_pr):
         raise gr.Error(f"Pipeline failed: {err}")
 
     n = result["n"]
-    pr_url = result.get("pr_url")
+    link = result.get("link")
+    mode = result.get("mode")
     ds_url = f"https://huggingface.co/datasets/{target_repo}"
     logs.append(f"✅ Done — {n} episode(s).")
-    if pr_url:
+    if mode == "pr":
         summary = (
             f"### ✅ Done — {n} episode(s) — Pull Request opened\n"
-            f"- **PR:** 👉 [{pr_url}]({pr_url}) 👈\n"
+            f"- **PR:** 👉 [{link}]({link}) 👈\n"
             f"- **Target:** [{target_repo}]({ds_url})\n"
+        )
+    elif mode == "branch":
+        new_pr_url = f"{ds_url}/discussions/new"
+        summary = (
+            f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
+            f"_(Opening a PR directly isn't allowed with a sign-in token, so the "
+            f"result was pushed to a branch instead.)_\n"
+            f"- **Branch:** 👉 [{link}]({link}) 👈\n"
+            f"- **Open a PR from it:** [{new_pr_url}]({new_pr_url})\n"
         )
     else:
         viz_url = _visualizer_url(target_repo)
@@ -265,29 +282,44 @@ def run_pipeline_pr(source_repo, target_repo, task, oauth_token: gr.OAuthToken |
     yield from _run(source_repo, target_repo, task, oauth_token, create_pr=True)
 
 
-with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
-    gr.Markdown(
-        "# Grabette post-processing\n"
-        "Convert a raw OAK-D dataset from the Hub into a LeRobot dataset and push "
-        "it back to the Hub. Each episode is checked, converted, run through SLAM, assembled "
-        "into LeRobot v3 format, then uploaded."
-    )
-    gr.LoginButton()
-    source = gr.Textbox(label="Source dataset (raw repo_id)",
-                        placeholder="pollen-robotics/grabette-raw")
-    target = gr.Textbox(label="Target dataset (repo_id to create)",
-                        placeholder="your-account/grabette-demo")
-    task = gr.Textbox(label="Task description", placeholder="cup manipulation")
-    with gr.Row():
-        btn = gr.Button("Run pipeline", variant="primary")
-        stop_btn = gr.Button("Stop", variant="stop")
-    # Revealed only when the target dataset already exists (see _run).
-    confirm_pr_btn = gr.Button("Push as PR to existing repo", variant="secondary",
-                               visible=False)
+THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
 
-    bar = gr.HTML()
-    log_out = gr.Textbox(label="Log", lines=20, max_lines=20, autoscroll=True)
-    summary_out = gr.Markdown()
+CSS = """
+.gradio-container {max-width: 1080px !important; margin: 0 auto !important;}
+#app-header {text-align:center; margin: 2px 0 6px;}
+#app-header h1 {font-size: 1.45rem; margin: 0;}
+#app-header p {color: var(--body-text-color-subdued); margin: 2px 0 0; font-size: .9rem;}
+#logbox textarea {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  font-size: 12px; line-height: 1.35;}
+footer {display: none !important;}
+"""
+
+with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_height=True) as demo:
+    gr.HTML(
+        "<div id='app-header'><h1>🤖 Grabette post-processing</h1>"
+        "<p>Raw OAK-D recording → SLAM → LeRobot dataset on the Hub</p></div>"
+    )
+    with gr.Row():
+        # ---- Inputs (left) ----
+        with gr.Column(scale=2, min_width=280):
+            gr.LoginButton(size="sm")
+            source = gr.Textbox(label="Source dataset", info="raw OAK-D repo on the Hub",
+                                placeholder="pollen-robotics/grabette-raw")
+            target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
+                                placeholder="your-account/grabette-demo")
+            task = gr.Textbox(label="Task description", placeholder="cup manipulation")
+            with gr.Row():
+                btn = gr.Button("▶  Run", variant="primary", scale=3)
+                stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
+            # Revealed only when the target dataset already exists (see _run).
+            confirm_pr_btn = gr.Button("Push as PR to existing repo",
+                                       variant="secondary", size="sm", visible=False)
+        # ---- Outputs (right) ----
+        with gr.Column(scale=3, min_width=280):
+            bar = gr.HTML(_bar(0, "ready"))
+            log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
+                                 elem_id="logbox", show_copy_button=True)
+            summary_out = gr.Markdown()
 
     outputs = [bar, log_out, summary_out, confirm_pr_btn]
     run_event = btn.click(run_pipeline, inputs=[source, target, task], outputs=outputs)
