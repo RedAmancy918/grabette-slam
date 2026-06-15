@@ -5,6 +5,7 @@ Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -85,7 +86,7 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
         raise ValueError(f"No episodes (oakd_left.mp4) found under {dataset_dir}")
 
     total = len(episodes)
-    log(f"Found {total} episode(s)")
+    log(f"Found {total} episode(s) : {', '.join(ep.name for ep in episodes)}")
     if on_progress:
         on_progress(0, total, "slam")
     workers = min(total, os.cpu_count() or 2)
@@ -107,6 +108,39 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
             if on_progress:
                 on_progress(done, total, "slam")
     return sorted(processed)
+
+
+def _push_to_branch(ds, target_repo, branch, log, attempts=3):
+    """push_to_hub to a branch, retrying transient HF 5xx errors, with an error
+    message keyed on the real HTTP status (a 5xx is a server hiccup, not a token
+    problem — only 401/403 mean the sign-in token can't write)."""
+    for i in range(attempts):
+        try:
+            ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"], tag_version=False)
+            return
+        except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status and status >= 500 and i < attempts - 1:
+                wait = 3 * (i + 1)
+                log(f"  ⚠️ HF server error (HTTP {status}); retrying in {wait}s "
+                    f"({i + 1}/{attempts - 1})…")
+                time.sleep(wait)
+                continue
+            if status in (401, 403):
+                raise RuntimeError(
+                    f"Could not write to {target_repo} (HTTP {status}): your sign-in "
+                    f"token appears read-only. Re-login to grant the Space the "
+                    f"write-repos scope, then re-run."
+                ) from e
+            if status and status >= 500:
+                raise RuntimeError(
+                    f"Hugging Face had a server error (HTTP {status}) while pushing to "
+                    f"branch '{branch}' on {target_repo}. This is usually transient — "
+                    f"wait a moment and re-run."
+                ) from e
+            raise RuntimeError(
+                f"Could not push to branch '{branch}' on {target_repo}: {e}"
+            ) from e
 
 
 def process_dataset(dataset_dir, target_repo, task, root, log=print,
@@ -157,13 +191,7 @@ def process_dataset(dataset_dir, target_repo, task, root, log=print,
         slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:40] or "update"
         branch = f"grabette-{slug}"
         log(f"Pushing to branch '{branch}' on {target_repo} …")
-        try:
-            ds.push_to_hub(branch=branch, tags=["lerobot", "grabette"], tag_version=False)
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not write to {target_repo} (HF said: {e}). Your sign-in token "
-                f"appears read-only — re-login to grant the Space write-repos scope."
-            ) from e
+        _push_to_branch(ds, target_repo, branch, log)
         branch_url = f"https://huggingface.co/datasets/{target_repo}/tree/{branch}"
         log(f"✅ Pushed to branch '{branch}'.")
         return len(processed), branch_url, "branch"

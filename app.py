@@ -115,7 +115,7 @@ def _preflight(api, source_repo, target_repo):
         )
     except GatedRepoError:
         return None, None, (
-            f"Source dataset '{source_repo}' is gated. Accept its access terms on "
+            f"Error on the source dataset '{source_repo}':\nIt is gated. Accept its access terms on "
             f"the Hub first, then re-run."
         )
     except Exception as e:
@@ -123,14 +123,12 @@ def _preflight(api, source_repo, target_repo):
 
     # ---- Target: resolve namespace + whether this account can write to it ----
     # whoami() returns each org with the user's role; only write-capable roles can
-    # push datasets, so being *in* an org isn't enough — check the role too. The
-    # field is "roleInOrg" (older payloads used "roleInGroup"), so read both.
+    # push datasets, so being *in* an org isn't enough — check the role too.
     WRITE_ROLES = {"admin", "write", "contributor"}
     try:
         me = api.whoami()
         username = me.get("name")
-        org_roles = {o.get("name"): (o.get("roleInOrg") or o.get("roleInGroup"))
-                     for o in me.get("orgs", [])}
+        org_roles = {o.get("name"): o.get("roleInGroup") for o in me.get("orgs", [])}
     except Exception:
         username, org_roles = None, {}
     ns = target_repo.split("/")[0] if "/" in target_repo else username
@@ -215,13 +213,13 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
 
     if not exists:
-        logs.append(f"  ✓ target '{target_repo}' is new and writable")
+        logs.append(f"Target '{target_repo}' is new and writable")
     elif not to_branch:
-        logs.append(f"⚠️ target '{target_repo}' already exists")
+        logs.append(f"Target '{target_repo}' already exists")
         warn = (
-            f"### ⚠️ Target already exists\n"
-            f"`{target_repo}` already exists on the Hub. To avoid overwriting it, "
-            f"click **Push to a new branch** — your result lands on a `grabette-…` "
+            f"### ⚠️ Target dataset already exists\n"
+            f"`{target_repo}` already exists on the Hub.\nTo avoid overwriting it, "
+            f"click **Push to a new branch**:\n your result lands on a `grabette-…` "
             f"branch and `main` is left untouched.\n\n"
             f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
         )
@@ -263,7 +261,7 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
                     print(f"Downloading {source_repo}…")
                 raw = snapshot_download(source_repo, repo_type="dataset",
                                         local_dir=work / "raw", token=token)
-                print("Download complete.")
+                print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))
                 n, link, mode = process_dataset(
                     raw, target_repo, task, root=work / "lerobot",
