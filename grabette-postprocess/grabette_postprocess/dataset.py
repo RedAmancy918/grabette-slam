@@ -84,6 +84,7 @@ def build_dataset(
     fps: float | None = None,
     image_size: tuple[int, int] = (720, 960),
     root: Path | None = None,
+    source_user: str | None = None,
 ):
     """Build LeRobot v3 dataset from processed episode directories.
 
@@ -99,6 +100,10 @@ def build_dataset(
         fps: dataset frame rate (default: 50fps, the native Arducam rate)
         image_size: (height, width) for Arducam output frames
         root: local storage path (default: HF cache)
+        source_user: if set, write a `meta/episode_sources.json` traceability
+            sidecar mapping each episode to its source recording and this user,
+            with a `name` like "20210102_chouziel". Used when several users push
+            into the same repo (e.g. on branches) so episodes stay distinguishable.
     """
     # Lazy import — lerobot is a heavy dependency
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -124,6 +129,10 @@ def build_dataset(
         use_videos=True,
         vcodec="h264",
     )
+
+    # Source recording name per saved episode, aligned with episode_index (0..N-1
+    # in save order). Episodes skipped below (no trajectory CSV) are not appended.
+    saved_recordings: list[str] = []
 
     for ep_dir in episode_dirs:
         ep_dir = Path(ep_dir).absolute()
@@ -190,11 +199,35 @@ def build_dataset(
             dataset.add_frame(frame_data)
 
         dataset.save_episode()
+        saved_recordings.append(ep_dir.name)
         print(f"  Saved episode: {n_frames} frames")
 
     dataset.finalize()
+
+    if source_user:
+        _write_episode_sources(Path(dataset.root), saved_recordings, source_user)
+
     print(f"\nDataset complete: {repo_id}")
     if root:
         print(f"  Location: {root}")
+
+
+def _write_episode_sources(ds_root: Path, recordings: list[str], user: str) -> None:
+    """Write meta/episode_sources.json: per-episode traceability to its source
+    recording and the user who produced it. Additive sidecar — LeRobot ignores it
+    on load, and push_to_hub uploads it with the rest of the dataset folder."""
+    entries = [
+        {
+            "episode_index": i,
+            "recording": rec,
+            "user": user,
+            "name": f"{rec}_{user}",
+        }
+        for i, rec in enumerate(recordings)
+    ]
+    out = ds_root / "meta" / "episode_sources.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"episodes": entries}, indent=2))
+    print(f"  Wrote {out.name}: {len(entries)} episode(s) tagged with user '{user}'")
 
     return dataset

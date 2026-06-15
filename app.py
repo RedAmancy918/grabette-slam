@@ -17,7 +17,7 @@ import gradio as gr
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 
-from pipeline import process_dataset
+from pipeline import build_lerobot, push_lerobot
 
 VISUALIZER = "https://huggingface.co/spaces/lerobot/visualize_dataset"
 
@@ -93,6 +93,28 @@ def _error_card(msg: str) -> str:
         'padding:12px 16px;color:#991b1b;font-weight:500;'
         'font-family:var(--font,sans-serif);white-space:pre-wrap">'
         f'{msg}</div>'
+    )
+
+
+def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> str:
+    """Final success card — same for a first-try push and a retried push."""
+    ds_url = f"https://huggingface.co/datasets/{target_repo}"
+    if mode == "branch":
+        return (
+            f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
+            f"_(A sign-in token can't open a PR — that needs the discussions/PR "
+            f"permission — so the result was pushed to a branch, leaving `main` "
+            f"untouched.)_\n"
+            f"- **Branch:** 👉 [{link}]({link}) 👈\n"
+            f"- Review it there, then merge the branch into `main` (git / API) when ready.\n"
+        )
+    viz_url = _visualizer_url(target_repo)
+    # The LeRobot visualizer sends X-Frame-Options: deny, so link out.
+    return (
+        f"### ✅ Done — {n} episode(s)\n"
+        f"- **Dataset:** [{target_repo}]({ds_url})\n"
+        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
+        f"_(The visualizer needs the dataset to be public.)_"
     )
 
 
@@ -192,22 +214,26 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     logs: list[str] = []
     start = time.time()
     frac, label = 0.02, "checking"
-    NOBTN = gr.update()  # leave the confirm button as-is
+    NOBTN = gr.update()  # leave a button as-is
+    HIDE = gr.update(visible=False)
+    retry_ctx = None  # set when a push fails but the built dataset is reusable
 
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", btn=NOBTN):
-        return _bar(frac, f"{label} · {int(time.time() - start)}s"), render(), summary, btn
+    def view(summary="", branch_btn=NOBTN, retry_btn=NOBTN):
+        # 6 outputs: bar, log, summary, branch button, retry button, retry state.
+        return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
+                summary, branch_btn, retry_btn, retry_ctx)
 
     # ---- Pre-flight (synchronous, fast) ---------------------------------
     logs.append("Checking repo access…")
-    yield view()
+    yield view(branch_btn=HIDE, retry_btn=HIDE)  # fresh run: clear leftover buttons/state
     api = HfApi(token=token)
     exists, _writable, err = _preflight(api, source_repo, target_repo)
     if err:
         logs.append(err)
-        yield _bar(0, "error"), render(), _error_card(err), gr.update(visible=False)
+        yield (_bar(0, "error"), render(), _error_card(err), HIDE, HIDE, retry_ctx)
         return
     logs.append("  ✓ source readable")
     logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
@@ -224,7 +250,8 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
             f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
         )
         frac, label = 0.05, "target exists"
-        yield _bar(frac, "target exists"), render(), warn, gr.update(visible=True)
+        yield (_bar(frac, "target exists"), render(), warn,
+               gr.update(visible=True), HIDE, retry_ctx)
         return
     else:
         logs.append(f"  ✓ target '{target_repo}' exists — will push to a branch")
@@ -263,10 +290,17 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
                                         local_dir=work / "raw", token=token)
                 print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))
-                n, link, mode = process_dataset(
-                    raw, target_repo, task, root=work / "lerobot",
+                ds_root = work / "lerobot"
+                processed = build_lerobot(
+                    raw, target_repo, task, root=ds_root,
                     log=print, should_stop=_stop.is_set, to_branch=to_branch,
                     on_progress=on_progress, token=token)
+                # Build done — dataset cached on disk; record it so that if the push
+                # fails, the "Retry push" button can reuse it (no re-running SLAM).
+                result["built"] = {"root": str(ds_root), "n": len(processed)}
+                n, link, mode = push_lerobot(
+                    target_repo, task, ds_root, len(processed),
+                    to_branch=to_branch, token=token, log=print, on_progress=on_progress)
                 writer.flush()
             result["n"], result["link"], result["mode"] = n, link, mode
         except Exception as e:
@@ -296,35 +330,108 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     t.join()
     if "error" in result:
         err = result["error"]
-        yield (_bar(frac, "failed"), render(),
-               _error_card(f"Pipeline failed: {err}"), gr.update(visible=False))
+        if result.get("built"):
+            # Build succeeded, push didn't — offer a push-only retry, no re-SLAM.
+            retry_ctx = {"target_repo": target_repo, "task": task, "to_branch": to_branch,
+                         "root": result["built"]["root"], "n": result["built"]["n"]}
+            msg = _error_card(
+                f"Push failed: {err}\n\nThe dataset is built and cached — click "
+                f"“Retry push” to push it again without re-running SLAM.")
+            yield (_bar(frac, "push failed"), render(), msg, HIDE,
+                   gr.update(visible=True), retry_ctx)
+        else:
+            yield (_bar(frac, "failed"), render(),
+                   _error_card(f"Pipeline failed: {err}"), HIDE, HIDE, retry_ctx)
         return
 
     n = result["n"]
     link = result.get("link")
     mode = result.get("mode")
-    ds_url = f"https://huggingface.co/datasets/{target_repo}"
     logs.append(f"✅ Done — {n} episode(s).")
-    if mode == "branch":
-        summary = (
-            f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
-            f"_(A sign-in token can't open a PR — that needs the discussions/PR "
-            f"permission — so the result was pushed to a branch, leaving `main` "
-            f"untouched.)_\n"
-            f"- **Branch:** 👉 [{link}]({link}) 👈\n"
-            f"- Review it there, then merge the branch into `main` (git / API) when ready.\n"
-        )
-    else:
-        viz_url = _visualizer_url(target_repo)
-        # The LeRobot visualizer sends X-Frame-Options: deny, so link out.
-        summary = (
-            f"### ✅ Done — {n} episode(s)\n"
-            f"- **Dataset:** [{target_repo}]({ds_url})\n"
-            f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
-            f"_(The visualizer needs the dataset to be public.)_"
-        )
     frac, label = 1.0, "done"
-    yield _bar(1.0, "done"), render(), summary, gr.update(visible=False)
+    yield (_bar(1.0, "done"), render(), _success_summary(target_repo, n, link, mode),
+           HIDE, HIDE, retry_ctx)
+
+
+def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
+    """Retry just the push of an already-built dataset — no re-download, no SLAM.
+    Reuses the on-disk dataset captured in retry_ctx by a previous failed run."""
+    if oauth_token is None:
+        raise gr.Error("Sign in with your Hugging Face account first.")
+    if not retry_ctx:
+        raise gr.Error("Nothing to retry — run the pipeline first.")
+    token = oauth_token.token
+    os.environ["HF_TOKEN"] = token
+
+    logs: list[str] = []
+    start = time.time()
+    frac, label = 0.95, "pushing"
+    HIDE = gr.update(visible=False)
+
+    def render() -> str:
+        return "\n".join(logs)
+
+    def view(summary="", retry_btn=gr.update(), ctx=retry_ctx):
+        return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
+                summary, HIDE, retry_btn, ctx)
+
+    logs.append("Retrying push (dataset already built — skipping SLAM)…")
+    yield view(retry_btn=HIDE)  # hide while this retry runs (avoid double-click)
+
+    q: "queue.Queue[tuple]" = queue.Queue()
+    result: dict = {}
+
+    def on_progress(done, total, phase):
+        q.put(("progress", 0.95, "pushing branch" if retry_ctx["to_branch"] else "pushing"))
+
+    def worker():
+        writer = _LineQueueWriter(q)
+        try:
+            with contextlib.redirect_stdout(writer):
+                n, link, mode = push_lerobot(
+                    retry_ctx["target_repo"], retry_ctx["task"], Path(retry_ctx["root"]),
+                    retry_ctx["n"], to_branch=retry_ctx["to_branch"], token=token,
+                    log=print, on_progress=on_progress)
+                writer.flush()
+            result["n"], result["link"], result["mode"] = n, link, mode
+        except Exception as e:
+            writer.flush()
+            result["error"] = e
+        finally:
+            q.put(("done",))
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    while True:
+        try:
+            item = q.get(timeout=1.0)
+        except queue.Empty:
+            yield view()
+            continue
+        if item[0] == "done":
+            break
+        if item[0] == "progress":
+            frac, label = item[1], item[2]
+        else:
+            logs.append(item[1])
+        yield view()
+    t.join()
+
+    if "error" in result:
+        err = result["error"]
+        # Keep the dataset cached and the retry button up for another attempt.
+        yield (_bar(frac, "push failed"), render(),
+               _error_card(f"Push failed again: {err}"),
+               HIDE, gr.update(visible=True), retry_ctx)
+        return
+
+    n = result["n"]
+    link = result.get("link")
+    mode = result.get("mode")
+    logs.append(f"✅ Pushed — {n} episode(s).")
+    frac, label = 1.0, "done"
+    yield (_bar(1.0, "done"), render(),
+           _success_summary(retry_ctx["target_repo"], n, link, mode), HIDE, HIDE, None)
 
 
 def run_pipeline(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
@@ -367,6 +474,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             # Revealed only when the target dataset already exists (see _run).
             confirm_branch_btn = gr.Button("Push to a new branch",
                                            variant="secondary", size="sm", visible=False)
+            # Revealed only when a build succeeded but the push failed (see _run).
+            retry_btn = gr.Button("⟳  Retry push", variant="secondary",
+                                  size="sm", visible=False)
+            # Holds the built-but-unpushed dataset context for retry_push.
+            retry_state = gr.State(None)
         # ---- Outputs (right) ----
         with gr.Column(scale=3, min_width=280):
             bar = gr.HTML(_bar(0, "ready"))
@@ -374,14 +486,15 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                  elem_id="logbox")
             summary_out = gr.Markdown()
 
-    outputs = [bar, log_out, summary_out, confirm_branch_btn]
+    outputs = [bar, log_out, summary_out, confirm_branch_btn, retry_btn, retry_state]
     run_event = btn.click(run_pipeline, inputs=[source, target, task], outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch, inputs=[source, target, task],
                                             outputs=outputs)
+    retry_event = retry_btn.click(retry_push, inputs=[retry_state], outputs=outputs)
     # Stop: cancel whichever generator is streaming (frees the UI at once) and
     # signal the worker to abandon the run (skip remaining episodes + the push).
     stop_btn.click(_request_stop, inputs=None, outputs=None,
-                   cancels=[run_event, branch_event])
+                   cancels=[run_event, branch_event, retry_event])
 
 
 if __name__ == "__main__":
