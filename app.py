@@ -109,8 +109,8 @@ def _preflight(api, source_repo, target_repo):
         api.repo_info(source_repo, repo_type="dataset")
     except RepositoryNotFoundError:
         return None, None, (
-            f"Source dataset '{source_repo}' doesn't exist — or it's private and "
-            f"your account can't see it. Check the spelling; it should look like "
+            f"Error on the source dataset '{source_repo}':\nEither it doesn't exist, or it's private and "
+            f"your account can't see it.\nCheck the spelling; it should look like "
             f"'username/dataset-name'."
         )
     except GatedRepoError:
@@ -123,12 +123,14 @@ def _preflight(api, source_repo, target_repo):
 
     # ---- Target: resolve namespace + whether this account can write to it ----
     # whoami() returns each org with the user's role; only write-capable roles can
-    # push datasets, so being *in* an org isn't enough — check the role too.
+    # push datasets, so being *in* an org isn't enough — check the role too. The
+    # field is "roleInOrg" (older payloads used "roleInGroup"), so read both.
     WRITE_ROLES = {"admin", "write", "contributor"}
     try:
         me = api.whoami()
         username = me.get("name")
-        org_roles = {o.get("name"): o.get("roleInGroup") for o in me.get("orgs", [])}
+        org_roles = {o.get("name"): (o.get("roleInOrg") or o.get("roleInGroup"))
+                     for o in me.get("orgs", [])}
     except Exception:
         username, org_roles = None, {}
     ns = target_repo.split("/")[0] if "/" in target_repo else username
@@ -349,7 +351,7 @@ footer {display: none !important;}
 
 with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     gr.HTML(
-        "<div id='app-header'><h1>🤖 Grabette post-processing</h1>"
+        "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw OAK-D recording → SLAM → LeRobot dataset on the Hub</p></div>"
     )
     with gr.Row():
