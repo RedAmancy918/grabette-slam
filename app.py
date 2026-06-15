@@ -15,6 +15,7 @@ from pathlib import Path
 
 import gradio as gr
 from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 
 from pipeline import process_dataset
 
@@ -85,12 +86,30 @@ def _bar(frac: float, label: str) -> str:
 
 
 def _preflight(api, source_repo, target_repo):
-    """Quick access/existence checks. Returns (exists, writable, error_or_None)."""
+    """Quick access/existence checks. Returns (exists, writable, error_or_None).
+
+    error_or_None is a clear, user-facing message (never a raw HF traceback) when
+    the source can't be read or the target can't be written — these surface as a
+    gr.Error popup before any heavy work starts.
+    """
+    # ---- Source: must exist and be readable with this token ----
     try:
         api.repo_info(source_repo, repo_type="dataset")
+    except RepositoryNotFoundError:
+        return None, None, (
+            f"Source dataset '{source_repo}' doesn't exist — or it's private and "
+            f"your account can't see it. Check the spelling; it should look like "
+            f"'username/dataset-name'."
+        )
+    except GatedRepoError:
+        return None, None, (
+            f"Source dataset '{source_repo}' is gated. Accept its access terms on "
+            f"the Hub first, then re-run."
+        )
     except Exception as e:
         return None, None, f"Cannot access source dataset '{source_repo}': {e}"
 
+    # ---- Target: resolve namespace + whether this account can write to it ----
     try:
         me = api.whoami()
         username = me.get("name")
@@ -101,6 +120,22 @@ def _preflight(api, source_repo, target_repo):
     writable = ns is not None and (ns == username or ns in orgs)
 
     exists = api.repo_exists(target_repo, repo_type="dataset")
+
+    if not writable:
+        if username is None:
+            return exists, False, (
+                "Couldn't confirm your Hugging Face identity from the sign-in "
+                "token. Sign out and back in, then re-run."
+            )
+        who = f"'{username}'" + (
+            f" (orgs: {', '.join(sorted(orgs))})" if orgs else " (no orgs)")
+        verb = "push to" if exists else "create"
+        return exists, False, (
+            f"You don't have write access to namespace '{ns}', so you can't "
+            f"{verb} '{target_repo}'. You're signed in as {who} — set the target "
+            f"to a namespace you own."
+        )
+
     return exists, writable, None
 
 
@@ -139,20 +174,15 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     logs.append("Checking repo access…")
     yield view()
     api = HfApi(token=token)
-    exists, writable, err = _preflight(api, source_repo, target_repo)
+    exists, _writable, err = _preflight(api, source_repo, target_repo)
     if err:
         logs.append(f"❌ {err}")
         yield _bar(0, "error"), render(), f"### ❌ {err}", gr.update(visible=False)
         raise gr.Error(err)
     logs.append("  ✓ source readable")
+    logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
 
     if not exists:
-        if not writable:
-            msg = (f"You don't have write access to namespace "
-                   f"'{target_repo.split('/')[0]}' to create '{target_repo}'.")
-            logs.append(f"❌ {msg}")
-            yield _bar(0, "error"), render(), f"### ❌ {msg}", gr.update(visible=False)
-            raise gr.Error(msg)
         logs.append(f"  ✓ target '{target_repo}' is new and writable")
     elif not to_branch:
         logs.append(f"⚠️ target '{target_repo}' already exists")
