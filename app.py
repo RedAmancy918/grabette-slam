@@ -85,12 +85,24 @@ def _bar(frac: float, label: str) -> str:
     )
 
 
+def _error_card(msg: str) -> str:
+    """A red-background error card for the summary slot — shown instead of raising
+    gr.Error, which would stamp an "Error" badge on every output component."""
+    return (
+        '<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;'
+        'padding:12px 16px;color:#991b1b;font-weight:500;'
+        'font-family:var(--font,sans-serif);white-space:pre-wrap">'
+        f'{msg}</div>'
+    )
+
+
 def _preflight(api, source_repo, target_repo):
     """Quick access/existence checks. Returns (exists, writable, error_or_None).
 
     error_or_None is a clear, user-facing message (never a raw HF traceback) when
-    the source can't be read or the target can't be written — these surface as a
-    gr.Error popup before any heavy work starts.
+    the source can't be read or the target can't be written — shown in the red
+    error card before any heavy work starts. Both checks run up front so a bad
+    source or an unwritable target fails fast, not after a long SLAM run.
     """
     # ---- Source: must exist and be readable with this token ----
     try:
@@ -110,14 +122,25 @@ def _preflight(api, source_repo, target_repo):
         return None, None, f"Cannot access source dataset '{source_repo}': {e}"
 
     # ---- Target: resolve namespace + whether this account can write to it ----
+    # whoami() returns each org with the user's role; only write-capable roles can
+    # push datasets, so being *in* an org isn't enough — check the role too.
+    WRITE_ROLES = {"admin", "write", "contributor"}
     try:
         me = api.whoami()
         username = me.get("name")
-        orgs = {o.get("name") for o in me.get("orgs", [])}
+        org_roles = {o.get("name"): o.get("roleInGroup") for o in me.get("orgs", [])}
     except Exception:
-        username, orgs = None, set()
+        username, org_roles = None, {}
     ns = target_repo.split("/")[0] if "/" in target_repo else username
-    writable = ns is not None and (ns == username or ns in orgs)
+
+    if ns is None:
+        writable = False
+    elif ns == username:
+        writable = True
+    elif ns in org_roles:
+        writable = org_roles[ns] in WRITE_ROLES
+    else:
+        writable = False
 
     exists = api.repo_exists(target_repo, repo_type="dataset")
 
@@ -127,9 +150,16 @@ def _preflight(api, source_repo, target_repo):
                 "Couldn't confirm your Hugging Face identity from the sign-in "
                 "token. Sign out and back in, then re-run."
             )
-        who = f"'{username}'" + (
-            f" (orgs: {', '.join(sorted(orgs))})" if orgs else " (no orgs)")
         verb = "push to" if exists else "create"
+        if ns in org_roles:
+            role = org_roles[ns] or "read-only"
+            return exists, False, (
+                f"Your role in the '{ns}' org is '{role}', which can't write "
+                f"datasets — so you can't {verb} '{target_repo}'. Ask an org admin "
+                f"for write access, or set the target to a namespace you own."
+            )
+        who = f"'{username}'" + (
+            f" (orgs: {', '.join(sorted(org_roles))})" if org_roles else " (no orgs)")
         return exists, False, (
             f"You don't have write access to namespace '{ns}', so you can't "
             f"{verb} '{target_repo}'. You're signed in as {who} — set the target "
@@ -176,9 +206,9 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     api = HfApi(token=token)
     exists, _writable, err = _preflight(api, source_repo, target_repo)
     if err:
-        logs.append(f"❌ {err}")
-        yield _bar(0, "error"), render(), f"### ❌ {err}", gr.update(visible=False)
-        raise gr.Error(err)
+        logs.append(err)
+        yield _bar(0, "error"), render(), _error_card(err), gr.update(visible=False)
+        return
     logs.append("  ✓ source readable")
     logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
 
@@ -266,8 +296,9 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     t.join()
     if "error" in result:
         err = result["error"]
-        yield _bar(frac, "failed"), render(), f"### ❌ Failed\n```\n{err}\n```", gr.update(visible=False)
-        raise gr.Error(f"Pipeline failed: {err}")
+        yield (_bar(frac, "failed"), render(),
+               _error_card(f"Pipeline failed: {err}"), gr.update(visible=False))
+        return
 
     n = result["n"]
     link = result.get("link")
