@@ -287,7 +287,8 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
                 except Exception:
                     print(f"Downloading {source_repo}…")
                 raw = snapshot_download(source_repo, repo_type="dataset",
-                                        local_dir=work / "raw", token=token)
+                                        local_dir=work / "raw", token=token,
+                                        max_workers=16)  # raw episodes are many small depth PNGs
                 print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))
                 ds_root = work / "lerobot"
