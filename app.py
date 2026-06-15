@@ -473,7 +473,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                 stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
             # Revealed only when the target dataset already exists (see _run).
             confirm_branch_btn = gr.Button("Push to a new branch",
-                                           variant="secondary", size="sm", visible=False)
+                                           variant="huggingface", size="sm", visible=False)
             # Revealed only when a build succeeded but the push failed (see _run).
             retry_btn = gr.Button("⟳  Retry push", variant="secondary",
                                   size="sm", visible=False)

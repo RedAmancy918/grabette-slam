@@ -229,5 +229,3 @@ def _write_episode_sources(ds_root: Path, recordings: list[str], user: str) -> N
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"episodes": entries}, indent=2))
     print(f"  Wrote {out.name}: {len(entries)} episode(s) tagged with user '{user}'")
-
-    return dataset
