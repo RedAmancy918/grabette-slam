@@ -127,7 +127,11 @@ def build_dataset(
         root=root,
         robot_type="grabette",
         use_videos=True,
-        vcodec="h264",
+        vcodec="h264",  # kept over the libsvtav1 default so the LeRobot web visualizer can play it
+        # Encode frames straight to MP4 as they're added, instead of writing every
+        # frame to disk as PNG and re-reading + re-encoding at save_episode(). The
+        # PNG round-trip is the main cost of the "building dataset" step on CPU.
+        streaming_encoding=True,
     )
 
     # Source recording name per saved episode, aligned with episode_index (0..N-1
