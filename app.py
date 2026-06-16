@@ -6,6 +6,7 @@ Gradio auto-injects the gr.OAuthToken parameter — it is NOT a UI input.
 """
 
 import contextlib
+import html
 import os
 import queue
 import re
@@ -103,6 +104,43 @@ def _io(state, bar_html, log_text):
             gr.update(value=log_text, visible=show))
 
 
+def _selection_card(source="", target="", task="", include_right=None) -> str:
+    """Small read-only recap of the user's inputs, shown in place of the editable
+    fields while a run is in progress."""
+    rows = []
+    if source:
+        rows.append(f"Source: <code>{html.escape(source)}</code>")
+    if target:
+        rows.append(f"Target: <code>{html.escape(target)}</code>")
+    if task:
+        rows.append(f"Task: {html.escape(task)}")
+    if include_right is not None:
+        rows.append("Right camera: " + ("on" if include_right else "off"))
+    return (
+        '<div style="font-size:12px;color:var(--body-text-color-subdued);'
+        'border:1px solid var(--border-color-primary,#e5e7eb);border-radius:8px;'
+        'padding:8px 10px;line-height:1.6">'
+        '<b style="font-size:12px">Selected</b><br>' + "<br>".join(rows) + '</div>'
+    )
+
+
+def _inputs_view(state, *, source="", target="", task="", include_right=None):
+    """Updates for [source, target, task, include_right, selection_card].
+
+    Once a run starts and until it's reset (state 'running' or 'finished') the
+    editable fields are hidden and replaced by a small read-only recap card. Only
+    the idle page (and the recoverable preflight/target-exists states) shows the
+    editable fields; there the card is hidden."""
+    hide = state in ("running", "finished")
+    fld = gr.update(visible=not hide)
+    if hide:
+        card = gr.update(visible=True,
+                         value=_selection_card(source, target, task, include_right))
+    else:
+        card = gr.update(visible=False)
+    return (fld, fld, fld, fld, card)
+
+
 def _reset_view():
     """Full reset to the idle page (clears log/summary/bar, only Run shown).
     Returns the 12-output tuple.
@@ -114,7 +152,8 @@ def _reset_view():
     """
     _pause.clear()
     _cancel_pending.clear()
-    return (*_io("idle", _bar(0, "ready"), ""), "", None, *_btns("idle"))
+    return (*_io("idle", _bar(0, "ready"), ""), "", None, *_btns("idle"),
+            *_inputs_view("idle"))
 
 
 def _visualizer_url(repo_id: str) -> str:
@@ -345,7 +384,9 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
         return (*_io(state, _bar(frac, lbl), render()), summary, retry_ctx,
                 *_btns(state, paused=_pause.is_set(),
                        cancel_pending=_cancel_pending.is_set(),
-                       branch=branch, retry=retry))
+                       branch=branch, retry=retry),
+                *_inputs_view(state, source=source_repo, target=target_repo,
+                              task=task, include_right=include_right))
 
     # ---- Pre-flight (synchronous, fast) ---------------------------------
     logs.append("Checking repo access…")
@@ -523,7 +564,9 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
         return (*_io(state, _bar(frac, f"{label} · {int(time.time() - start)}s"), render()),
                 summary, ctx,
                 *_btns(state, cancel_pending=_cancel_pending.is_set(),
-                       retry=retry, allow_pause=False))
+                       retry=retry, allow_pause=False),
+                *_inputs_view(state, target=retry_ctx["target_repo"],
+                              task=retry_ctx["task"]))
 
     logs.append("Retrying push (dataset already built — skipping SLAM)…")
     yield view()  # 'Running' + Cancel
@@ -641,6 +684,8 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             include_right = gr.Checkbox(
                 value=False, label="Download right OAK camera",
                 info="Unused by SLAM (left + depth); leave off for a faster download.")
+            # Read-only recap of the inputs, shown in their place while running.
+            selection_card = gr.HTML(visible=False)
             # Idle: only Run. Running: Run greyed to 'Running', + Pause + Cancel.
             # Finished: only Reset. All visibility is driven by the generators.
             with gr.Row():
@@ -674,12 +719,14 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                  elem_id="logbox", visible=False)
             summary_out = gr.Markdown()
 
-    # Order MUST match the generators' yields: (bar, log, summary, retry_state)
-    # then the 8 buttons from _btns(): branch, retry, run, pause, cancel,
-    # confirm_cancel, keep, reset.
+    # Order MUST match the generators' yields: (bar, log, summary, retry_state),
+    # the 8 buttons from _btns() (branch, retry, run, pause, cancel,
+    # confirm_cancel, keep, reset), then the 5 from _inputs_view() (source,
+    # target, task, include_right, selection_card).
     outputs = [bar, log_out, summary_out, retry_state,
                confirm_branch_btn, retry_btn,
-               run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn]
+               run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn,
+               source, target, task, include_right, selection_card]
     run_event = run_btn.click(run_pipeline, inputs=[source, target, task, include_right],
                               outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
