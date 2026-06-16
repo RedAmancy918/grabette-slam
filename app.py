@@ -95,8 +95,13 @@ def _btns(state, *, paused=False, cancel_pending=False,
 
 def _reset_view():
     """Full reset to the idle page (clears log/summary/bar, only Run shown).
-    Returns the 12-output tuple."""
-    _stop.clear()
+    Returns the 12-output tuple.
+
+    Clears the UI-facing flags (pause, cancel-pending) but NOT _stop: when this
+    runs as the .then() after a confirmed Cancel, the background worker is still
+    winding down and relies on _stop staying set to abandon (skip the push).
+    _run clears _stop itself at the start of the next run.
+    """
     _pause.clear()
     _cancel_pending.clear()
     return (_bar(0, "ready"), "", "", None, *_btns("idle"))
@@ -564,11 +569,12 @@ def reset():
 
 
 def confirm_cancel():
-    """Confirm-cancel handler: signal the worker to abandon, then reset to the
-    idle page. Wired with cancels=[run/branch/retry] so the streaming generator
-    is stopped at once; this return then restores the initial state."""
+    """Confirm-cancel handler: only signal the worker to abandon (outputs=None,
+    like the old Stop, so it preempts the running generator via cancels=). The
+    UI reset is done by reset() chained as .then() on this click — a single
+    function that both cancels= and writes outputs can't reliably apply its
+    outputs (it'd queue behind the generator it's cancelling)."""
     _stop.set()
-    return _reset_view()
 
 
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
@@ -652,10 +658,14 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     pause_btn.click(_toggle_pause, inputs=None, outputs=None)
     cancel_btn.click(_request_cancel, inputs=None, outputs=None)
     keep_btn.click(_keep_running, inputs=None, outputs=None)
-    # Confirm cancel: cancel whichever generator is streaming (frees the UI at
-    # once) + signal the worker to abandon, then reset the page to idle.
-    confirm_cancel_btn.click(confirm_cancel, inputs=None, outputs=outputs,
-                             cancels=[run_event, branch_event, retry_event])
+    # Confirm cancel: first cancel the streaming generator + signal the worker to
+    # abandon (outputs=None so it preempts at once), THEN reset the page to idle.
+    # Split into click(cancel) → .then(reset) because a single function can't both
+    # cancel a generator and reliably write that generator's outputs.
+    cancel_evt = confirm_cancel_btn.click(
+        confirm_cancel, inputs=None, outputs=None,
+        cancels=[run_event, branch_event, retry_event])
+    cancel_evt.then(reset, inputs=None, outputs=outputs)
 
 
 if __name__ == "__main__":
