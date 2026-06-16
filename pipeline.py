@@ -110,6 +110,40 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None) -> list
     return sorted(processed)
 
 
+def _save_trajectory_viz(episode_dirs, ds_root, log=print) -> int:
+    """Drop a per-episode Rerun recording (3D trajectory + camera frame) under
+    <ds_root>/meta/slam_viz/<episode>.rrd, so it ships with the dataset push.
+
+    Reads each episode's camera_trajectory.csv (still on disk in the work dir)
+    and logs the gravity-aligned trajectory + animated camera frame. Like the
+    episode_sources.json sidecar, these extra files live under meta/ and are
+    uploaded with the dataset folder; LeRobot ignores them on load. This is what
+    lets you inspect the exact SLAM output the Space produced, after the fact:
+    download the dataset and run `rerun meta/slam_viz/<episode>.rrd`.
+
+    Best-effort: a failure here never blocks the push — the dataset is the
+    deliverable, the .rrd is a diagnostic extra. Returns the count written.
+    """
+    try:
+        from grabette_postprocess.visualize import save_episode_rrd
+    except ImportError:
+        log("  (skipped trajectory.rrd: rerun-sdk not installed)")
+        return 0
+
+    viz_dir = Path(ds_root) / "meta" / "slam_viz"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for ep in episode_dirs:
+        try:
+            if save_episode_rrd(ep, viz_dir / f"{ep.name}.rrd") is not None:
+                n += 1
+        except Exception as e:
+            log(f"  ⚠️ trajectory.rrd failed for {ep.name}: {e}")
+    if n:
+        log(f"  ✓ wrote {n} trajectory.rrd into meta/slam_viz/ (ships with the dataset)")
+    return n
+
+
 def _branch_name(task: str) -> str:
     """Deterministic branch name from the task — same input gives the same branch,
     so a retry pushes to the branch the first attempt was aiming for."""
@@ -202,6 +236,11 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
     log(f"Building LeRobot dataset from {len(processed)} episode(s)…")
     build_dataset(repo_id=target_repo, episode_dirs=processed, task=task,
                   root=Path(root), source_user=source_user)
+
+    # Per-episode trajectory recordings (3D path + camera frame), bundled into
+    # the dataset so the SLAM output can be verified after the run — see
+    # _save_trajectory_viz. Best-effort; never blocks the push.
+    _save_trajectory_viz(processed, Path(root), log=log)
     return processed
 
 

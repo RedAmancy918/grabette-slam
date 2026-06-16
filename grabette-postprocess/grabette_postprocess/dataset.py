@@ -180,10 +180,15 @@ def build_dataset(
         video_ts = _load_video_timestamps(ep_dir, video_path)
         print(f"  RPi video: {len(video_ts)} frames, {video_ts[-1]:.2f}s")
 
-        # For each trajectory step, find the nearest video frame index
-        cam0_indices = np.array([
-            int(np.argmin(np.abs(video_ts - t))) for t in traj_ts
-        ])
+        # For each trajectory step, find the nearest video frame index. video_ts is
+        # monotonic, so a vectorized searchsorted + neighbour compare is O(n log m)
+        # instead of the O(n_traj x n_video) argmin loop (seconds saved on long eps).
+        if len(video_ts) < 2:
+            cam0_indices = np.zeros(len(traj_ts), dtype=int)
+        else:
+            pos = np.clip(np.searchsorted(video_ts, traj_ts), 1, len(video_ts) - 1)
+            left, right = video_ts[pos - 1], video_ts[pos]
+            cam0_indices = np.where(traj_ts - left <= right - traj_ts, pos - 1, pos)
         cam0_cache = _load_video_frames_indexed(video_path, image_size,
                                                 set(cam0_indices.tolist()))
 
