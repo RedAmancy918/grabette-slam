@@ -317,10 +317,13 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
                              if mb_skip else "") + "…")
                 except Exception:
                     print(f"Downloading {source_repo}…")
+                # Raw episodes are dominated by many small depth PNGs (≈600/ep),
+                # so the download is bound by per-file request overhead, not
+                # bandwidth — more concurrent connections is the main lever.
                 raw = snapshot_download(source_repo, repo_type="dataset",
                                         local_dir=work / "raw", token=token,
                                         ignore_patterns=ignore,
-                                        max_workers=16)  # raw episodes are many small depth PNGs
+                                        max_workers=48)
                 print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))
                 ds_root = work / "lerobot"
@@ -531,7 +534,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                 value=False, label="Download right OAK camera",
                 info="Unused by SLAM (left + depth); leave off for a faster download.")
             with gr.Row():
-                btn = gr.Button("▶  Run", variant="primary", scale=3)
+                btn = gr.Button("▶  Run", variant="primary", scale=3)                
                 stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
             # Revealed only when the target dataset already exists (see _run).
             confirm_branch_btn = gr.Button("Push to a new branch",
