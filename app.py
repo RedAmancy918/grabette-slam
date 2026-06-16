@@ -21,20 +21,85 @@ from pipeline import build_lerobot, push_lerobot
 
 VISUALIZER = "https://huggingface.co/spaces/lerobot/visualize_dataset"
 
-# Cooperative stop flag, shared between the run() worker and the Stop button.
-# The Space processes one run at a time, so a module-level flag is enough.
+# Cooperative control flags, shared between the worker and the control buttons.
+# The Space processes one run at a time, so module-level flags are enough.
+#   _stop           — abandon the run (Cancel confirmed)
+#   _pause          — hold the worker at the next safe checkpoint (Pause)
+#   _cancel_pending — Cancel was clicked, awaiting confirmation
+# The streaming generator is the ONLY writer of button state: it re-renders the
+# buttons from these flags on every tick. The Pause/Cancel/Keep handlers just
+# flip a flag (outputs=None, like the old Stop), so they never fight the
+# generator for the same components.
 _stop = threading.Event()
+_pause = threading.Event()
+_cancel_pending = threading.Event()
 
 
-def _request_stop():
-    """Stop button handler: signal the worker to abandon the current run.
+def _toggle_pause():
+    """Pause ⇄ Resume: flip the cooperative pause flag (button relabels itself on
+    the generator's next tick)."""
+    _pause.clear() if _pause.is_set() else _pause.set()
 
-    Gradio's cancels= stops the streaming generator immediately; this flag makes
-    the background worker actually stop (skip remaining episodes, skip the push).
-    In-flight blocking calls (a running download, one SLAM subprocess) finish on
-    their own, but nothing further is started and nothing is pushed.
+
+def _request_cancel():
+    """Cancel clicked: reveal the confirm/keep buttons (handled by the generator)."""
+    _cancel_pending.set()
+
+
+def _keep_running():
+    """'Keep running' clicked: dismiss the cancel confirmation."""
+    _cancel_pending.clear()
+
+
+def _wait_if_paused():
+    """Block while paused (used as the worker's checkpoint gate). Returns at once
+    if a stop/cancel is requested, so pausing then cancelling never deadlocks."""
+    while _pause.is_set() and not _stop.is_set():
+        time.sleep(0.2)
+
+
+def _btns(state, *, paused=False, cancel_pending=False,
+          branch=False, retry=False, allow_pause=True):
+    """Updates for the 8 buttons, in `outputs` order:
+    (branch, retry, run, pause, cancel, confirm_cancel, keep, reset).
+
+    state: 'idle' (only Run, enabled), 'running' (Run greyed 'Running' + Pause +
+    Cancel, or the confirm/keep pair when a cancel is pending), or 'finished'
+    (only Reset). branch/retry reveal those two extra buttons.
     """
-    _stop.set()
+    H = gr.update(visible=False)
+    branch_u = gr.update(visible=branch)
+    retry_u = gr.update(visible=retry)
+    if state == "running":
+        run_u = gr.update(visible=True, interactive=False, value="●  Running")
+        if cancel_pending:
+            pause_u = H
+            cancel_u = H
+            confirm_u = gr.update(visible=True)
+            keep_u = gr.update(visible=True)
+        else:
+            pause_u = (gr.update(visible=True, value=("▶  Resume" if paused else "⏸  Pause"))
+                       if allow_pause else H)
+            cancel_u = gr.update(visible=True)
+            confirm_u = H
+            keep_u = H
+        reset_u = H
+    elif state == "finished":
+        run_u = pause_u = cancel_u = confirm_u = keep_u = H
+        reset_u = gr.update(visible=True)
+    else:  # idle
+        run_u = gr.update(visible=True, interactive=True, value="▶  Run")
+        pause_u = cancel_u = confirm_u = keep_u = reset_u = H
+    return (branch_u, retry_u, run_u, pause_u, cancel_u, confirm_u, keep_u, reset_u)
+
+
+def _reset_view():
+    """Full reset to the idle page (clears log/summary/bar, only Run shown).
+    Returns the 12-output tuple."""
+    _stop.clear()
+    _pause.clear()
+    _cancel_pending.clear()
+    return (_bar(0, "ready"), "", "", None, *_btns("idle"))
 
 
 def _visualizer_url(repo_id: str) -> str:
@@ -192,9 +257,9 @@ def _preflight(api, source_repo, target_repo):
 
 
 def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
-    """Streaming generator behind both buttons. Yields the `outputs` tuple:
-    [bar, log, summary, branch btn, retry btn, retry state, run btn, stop btn,
-    reset btn].
+    """Streaming generator behind Run / branch. Yields the 12-element `outputs`
+    tuple: [bar, log, summary, retry state, branch, retry, run, pause, cancel,
+    confirm_cancel, keep, reset].
 
     A progress bar (gr.HTML, updated via yield — no gr.Progress overlay, so no
     UI flip) sits alongside the live log. The heavy work runs in a worker thread;
@@ -202,9 +267,13 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     run synchronously up front: source read access, target write access, and
     target existence — an existing target reveals the "push to a branch" button.
 
+    While running, the buttons reflect the _pause / _cancel_pending flags every
+    tick: Run is greyed to 'Running', with Pause (⇄ Resume) and Cancel. The run
+    ends 'idle' (Run back) for recoverable cases (bad inputs / target exists) or
+    'finished' (only Reset) on done / failure.
+
     include_right: when False (default), oakd_right.mp4 is excluded from the
-    download (SLAM never uses it — see the worker). When the run reaches a
-    terminal state (done / failed), Run+Stop are hidden and Reset is shown.
+    download (SLAM never uses it — see the worker).
     """
     if oauth_token is None:
         raise gr.Error("Sign in with your Hugging Face account first.")
@@ -221,37 +290,37 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     token = oauth_token.token
     os.environ["HF_TOKEN"] = token
 
+    _stop.clear()
+    _pause.clear()
+    _cancel_pending.clear()  # fresh run
+
     logs: list[str] = []
     start = time.time()
     frac, label = 0.02, "checking"
-    NOBTN = gr.update()  # leave a button as-is
-    SHOW = gr.update(visible=True)
-    HIDE = gr.update(visible=False)
     retry_ctx = None  # set when a push fails but the built dataset is reusable
 
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", branch_btn=NOBTN, retry_btn=NOBTN,
-             run_btn=NOBTN, stop_btn=NOBTN, reset_btn=NOBTN):
-        # 9 outputs: bar, log, summary, branch btn, retry btn, retry state,
-        # run btn, stop btn, reset btn.
-        return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
-                summary, branch_btn, retry_btn, retry_ctx,
-                run_btn, stop_btn, reset_btn)
+    def view(summary="", *, state="running", branch=False, retry=False):
+        # 12 outputs: bar, log, summary, retry state, then the 8 buttons.
+        lbl = (f"paused · {label}" if _pause.is_set()
+               else f"{label} · {int(time.time() - start)}s")
+        return (_bar(frac, lbl), render(), summary, retry_ctx,
+                *_btns(state, paused=_pause.is_set(),
+                       cancel_pending=_cancel_pending.is_set(),
+                       branch=branch, retry=retry))
 
     # ---- Pre-flight (synchronous, fast) ---------------------------------
     logs.append("Checking repo access…")
-    # Fresh run: clear leftover buttons/state and put Run/Stop back (in case a
-    # previous run finished and the user reached here via Reset → Run).
-    yield view(branch_btn=HIDE, retry_btn=HIDE, run_btn=SHOW, stop_btn=SHOW, reset_btn=HIDE)
+    yield view()  # 'Running' + Pause + Cancel appear immediately
     api = HfApi(token=token)
     exists, _writable, err = _preflight(api, source_repo, target_repo)
     if err:
         logs.append(err)
-        # Recoverable: keep Run/Stop so the user can fix the inputs and re-run.
+        # Recoverable: back to idle so the user can fix the inputs and re-run.
         frac, label = 0.0, "error"
-        yield view(summary=_error_card(err), branch_btn=HIDE, retry_btn=HIDE, reset_btn=HIDE)
+        yield view(summary=_error_card(err), state="idle")
         return
     logs.append("  ✓ source readable")
     logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
@@ -268,9 +337,9 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
             f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
         )
         frac, label = 0.05, "target exists"
-        # Recoverable: keep Run/Stop (re-run after editing the target) alongside
+        # Recoverable: back to idle (re-run after editing the target) but reveal
         # the "push to a branch" button.
-        yield view(summary=warn, branch_btn=SHOW, retry_btn=HIDE, reset_btn=HIDE)
+        yield view(summary=warn, state="idle", branch=True)
         return
     else:
         logs.append(f"  ✓ target '{target_repo}' exists — will push to a branch")
@@ -279,7 +348,6 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     # ---- Heavy work in a worker thread ----------------------------------
     q: "queue.Queue[tuple]" = queue.Queue()
     result: dict = {}
-    _stop.clear()  # fresh run
 
     def on_progress(done, total, phase):
         if phase == "slam":
@@ -330,13 +398,14 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
                 processed = build_lerobot(
                     raw, target_repo, task, root=ds_root,
                     log=print, should_stop=_stop.is_set, to_branch=to_branch,
-                    on_progress=on_progress, token=token)
+                    on_progress=on_progress, token=token, gate=_wait_if_paused)
                 # Build done — dataset cached on disk; record it so that if the push
                 # fails, the "Retry push" button can reuse it (no re-running SLAM).
                 result["built"] = {"root": str(ds_root), "n": len(processed)}
                 n, link, mode = push_lerobot(
                     target_repo, task, ds_root, len(processed),
-                    to_branch=to_branch, token=token, log=print, on_progress=on_progress)
+                    to_branch=to_branch, token=token, log=print,
+                    on_progress=on_progress, gate=_wait_if_paused)
                 writer.flush()
             result["n"], result["link"], result["mode"] = n, link, mode
         except Exception as e:
@@ -350,9 +419,10 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
 
     while True:
         try:
-            item = q.get(timeout=1.0)
+            # Short timeout so Pause/Cancel button changes reflect within a tick.
+            item = q.get(timeout=0.3)
         except queue.Empty:
-            yield view()  # tick the elapsed counter even when nothing new arrives
+            yield view()  # tick the elapsed counter / reflect pause+cancel flags
             continue
         tag = item[0]
         if tag == "done":
@@ -374,13 +444,10 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
                 f"Push failed: {err}\n\nThe dataset is built and cached — click "
                 f"“Retry push” to push it again without re-running SLAM.")
             label = "push failed"
-            yield view(summary=msg, branch_btn=HIDE, retry_btn=SHOW,
-                       run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
+            yield view(summary=msg, state="finished", retry=True)
         else:
             label = "failed"
-            yield view(summary=_error_card(f"Pipeline failed: {err}"),
-                       branch_btn=HIDE, retry_btn=HIDE,
-                       run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
+            yield view(summary=_error_card(f"Pipeline failed: {err}"), state="finished")
         return
 
     n = result["n"]
@@ -388,9 +455,7 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     mode = result.get("mode")
     logs.append(f"✅ Done — {n} episode(s).")
     frac, label = 1.0, "done"
-    yield view(summary=_success_summary(target_repo, n, link, mode),
-               branch_btn=HIDE, retry_btn=HIDE,
-               run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
+    yield view(summary=_success_summary(target_repo, n, link, mode), state="finished")
 
 
 def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
@@ -403,24 +468,27 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     token = oauth_token.token
     os.environ["HF_TOKEN"] = token
 
+    _stop.clear()
+    _pause.clear()
+    _cancel_pending.clear()
+
     logs: list[str] = []
     start = time.time()
     frac, label = 0.95, "pushing"
-    NOBTN = gr.update()
-    SHOW = gr.update(visible=True)
-    HIDE = gr.update(visible=False)
 
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", retry_btn=NOBTN, reset_btn=NOBTN, ctx=retry_ctx):
-        # Run/Stop stay hidden throughout a retry (we got here from a finished
-        # run). Same 9-output shape as _run.
+    def view(summary="", *, state="running", retry=False, ctx=retry_ctx):
+        # 12-output shape, same as _run. A push can't be paused, so allow_pause
+        # is False; Cancel still works (abandons the retry).
         return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
-                summary, HIDE, retry_btn, ctx, HIDE, HIDE, reset_btn)
+                summary, ctx,
+                *_btns(state, cancel_pending=_cancel_pending.is_set(),
+                       retry=retry, allow_pause=False))
 
     logs.append("Retrying push (dataset already built — skipping SLAM)…")
-    yield view(retry_btn=HIDE)  # hide while this retry runs (avoid double-click)
+    yield view()  # 'Running' + Cancel
 
     q: "queue.Queue[tuple]" = queue.Queue()
     result: dict = {}
@@ -448,7 +516,7 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     t.start()
     while True:
         try:
-            item = q.get(timeout=1.0)
+            item = q.get(timeout=0.3)
         except queue.Empty:
             yield view()
             continue
@@ -463,11 +531,11 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
 
     if "error" in result:
         err = result["error"]
-        # Keep the dataset cached and the retry button up for another attempt;
-        # Reset stays available too.
+        # Keep the dataset cached: finished state with Reset, plus Retry to try
+        # the push again.
         label = "push failed"
         yield view(summary=_error_card(f"Push failed again: {err}"),
-                   retry_btn=SHOW, reset_btn=SHOW, ctx=retry_ctx)
+                   state="finished", retry=True, ctx=retry_ctx)
         return
 
     n = result["n"]
@@ -476,7 +544,7 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     logs.append(f"✅ Pushed — {n} episode(s).")
     frac, label = 1.0, "done"
     yield view(summary=_success_summary(retry_ctx["target_repo"], n, link, mode),
-               retry_btn=HIDE, reset_btn=SHOW, ctx=None)
+               state="finished", ctx=None)
 
 
 def run_pipeline(source_repo, target_repo, task, include_right,
@@ -490,16 +558,17 @@ def run_pipeline_branch(source_repo, target_repo, task, include_right,
 
 
 def reset():
-    """Reset to the initial state: clear log/summary/bar, hide the branch/retry/
-    reset buttons, and bring Run/Stop back. Inputs (source/target/task) are kept
-    so the user can tweak and re-run. Outputs match the `outputs` list order."""
-    return (_bar(0, "ready"), "", "",
-            gr.update(visible=False),  # branch button
-            gr.update(visible=False),  # retry button
-            None,                      # retry state
-            gr.update(visible=True),   # run button
-            gr.update(visible=True),   # stop button
-            gr.update(visible=False))  # reset button
+    """Reset button (shown when finished): clear the page and return to idle
+    (only Run). Inputs (source/target/task) are kept so the user can re-run."""
+    return _reset_view()
+
+
+def confirm_cancel():
+    """Confirm-cancel handler: signal the worker to abandon, then reset to the
+    idle page. Wired with cancels=[run/branch/retry] so the streaming generator
+    is stopped at once; this return then restores the initial state."""
+    _stop.set()
+    return _reset_view()
 
 
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
@@ -533,16 +602,27 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             include_right = gr.Checkbox(
                 value=False, label="Download right OAK camera",
                 info="Unused by SLAM (left + depth); leave off for a faster download.")
+            # Idle: only Run. Running: Run greyed to 'Running', + Pause + Cancel.
+            # Finished: only Reset. All visibility is driven by the generators.
             with gr.Row():
-                btn = gr.Button("▶  Run", variant="primary", scale=3)                
-                stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
+                run_btn = gr.Button("▶  Run", variant="primary", scale=2)
+                pause_btn = gr.Button("⏸  Pause", variant="secondary",
+                                      scale=1, visible=False)
+                cancel_btn = gr.Button("✕  Cancel", variant="stop",
+                                       scale=1, visible=False)
+            # Cancel confirmation (revealed by Cancel; replaces Pause/Cancel).
+            with gr.Row():
+                confirm_cancel_btn = gr.Button("✓  Confirm cancel", variant="stop",
+                                               size="sm", visible=False)
+                keep_btn = gr.Button("Keep running", variant="secondary",
+                                     size="sm", visible=False)
             # Revealed only when the target dataset already exists (see _run).
             confirm_branch_btn = gr.Button("Push to a new branch",
                                            variant="huggingface", size="sm", visible=False)
             # Revealed only when a build succeeded but the push failed (see _run).
             retry_btn = gr.Button("⟳  Retry push", variant="secondary",
                                   size="sm", visible=False)
-            # Replaces Run/Stop once a run reaches a terminal state (see _run).
+            # Shown once a run reaches a terminal state.
             reset_btn = gr.Button("↺  Reset", variant="secondary", visible=False)
             # Holds the built-but-unpushed dataset context for retry_push.
             retry_state = gr.State(None)
@@ -553,20 +633,29 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                  elem_id="logbox")
             summary_out = gr.Markdown()
 
-    outputs = [bar, log_out, summary_out, confirm_branch_btn, retry_btn, retry_state,
-               btn, stop_btn, reset_btn]
-    run_event = btn.click(run_pipeline, inputs=[source, target, task, include_right],
-                          outputs=outputs)
+    # Order MUST match the generators' yields: (bar, log, summary, retry_state)
+    # then the 8 buttons from _btns(): branch, retry, run, pause, cancel,
+    # confirm_cancel, keep, reset.
+    outputs = [bar, log_out, summary_out, retry_state,
+               confirm_branch_btn, retry_btn,
+               run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn]
+    run_event = run_btn.click(run_pipeline, inputs=[source, target, task, include_right],
+                              outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
                                             inputs=[source, target, task, include_right],
                                             outputs=outputs)
     retry_event = retry_btn.click(retry_push, inputs=[retry_state], outputs=outputs)
-    # Reset: clear outputs and bring Run/Stop back after a terminal state.
     reset_btn.click(reset, inputs=None, outputs=outputs)
-    # Stop: cancel whichever generator is streaming (frees the UI at once) and
-    # signal the worker to abandon the run (skip remaining episodes + the push).
-    stop_btn.click(_request_stop, inputs=None, outputs=None,
-                   cancels=[run_event, branch_event, retry_event])
+    # Pause/Resume + cancel-confirm just flip cooperative flags; the running
+    # generator re-renders the buttons from them on its next tick (outputs=None
+    # → these never write the same components as the stream, so no conflict).
+    pause_btn.click(_toggle_pause, inputs=None, outputs=None)
+    cancel_btn.click(_request_cancel, inputs=None, outputs=None)
+    keep_btn.click(_keep_running, inputs=None, outputs=None)
+    # Confirm cancel: cancel whichever generator is streaming (frees the UI at
+    # once) + signal the worker to abandon, then reset the page to idle.
+    confirm_cancel_btn.click(confirm_cancel, inputs=None, outputs=outputs,
+                             cancels=[run_event, branch_event, retry_event])
 
 
 if __name__ == "__main__":

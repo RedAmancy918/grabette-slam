@@ -132,20 +132,28 @@ def check_episode(ep_dir: Path, require_right: bool = True) -> dict:
             if d:
                 warn.append(d)
 
-    # depth
+    # depth — either a packed lossless video (oakd_depth.mkv) or a legacy PNG dir
     depth_dir = ep_dir / "oakd_depth"
+    depth_mkv = ep_dir / "oakd_depth.mkv"
     depth_ts = ep_dir / "oakd_depth_timestamps.json"
-    n_depth_png = len(list(depth_dir.glob("*.png"))) if depth_dir.is_dir() else 0
     n_depth_ts = len(_samples(depth_ts)) if depth_ts.is_file() else 0
-    if not depth_dir.is_dir():
-        err.append("missing oakd_depth/")
-    else:
+    if depth_mkv.is_file():
+        # The video frames aren't cheap to count without decoding; trust the
+        # timestamps as the frame count (cross-checked against metadata below).
+        info.append(f"depth video/{n_depth_ts}ts")
+        exp = int(oak_meta.get("depth_frames", 0))
+        if exp and abs(exp - n_depth_ts) > 2:
+            warn.append(f"depth: metadata {exp} frames but {n_depth_ts} timestamps")
+    elif depth_dir.is_dir():
+        n_depth_png = len(list(depth_dir.glob("*.png")))
         info.append(f"depth {n_depth_png}png/{n_depth_ts}ts")
         if abs(n_depth_png - n_depth_ts) > 2:
             warn.append(f"depth: {n_depth_png} PNGs != {n_depth_ts} timestamps")
         exp = int(oak_meta.get("depth_frames", 0))
         if exp and abs(exp - n_depth_png) > 2:
             warn.append(f"depth: metadata {exp} frames but {n_depth_png} PNGs")
+    else:
+        err.append("missing depth (oakd_depth.mkv or oakd_depth/)")
 
     # left/depth seq overlap drives the SLAM frame count
     lt = ep_dir / "oakd_left_timestamps.json"
