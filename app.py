@@ -191,18 +191,28 @@ def _preflight(api, source_repo, target_repo):
     return exists, writable, None
 
 
-def _run(source_repo, target_repo, task, oauth_token, to_branch):
-    """Streaming generator behind both buttons. Yields a 4-tuple matching
-    [bar (HTML), log (Textbox), summary (Markdown), branch button (update)].
+def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
+    """Streaming generator behind both buttons. Yields the `outputs` tuple:
+    [bar, log, summary, branch btn, retry btn, retry state, run btn, stop btn,
+    reset btn].
 
     A progress bar (gr.HTML, updated via yield — no gr.Progress overlay, so no
     UI flip) sits alongside the live log. The heavy work runs in a worker thread;
     its output (log() + every print()) streams through a queue. Pre-flight checks
     run synchronously up front: source read access, target write access, and
     target existence — an existing target reveals the "push to a branch" button.
+
+    include_right: when False (default), oakd_right.mp4 is excluded from the
+    download (SLAM never uses it — see the worker). When the run reaches a
+    terminal state (done / failed), Run+Stop are hidden and Reset is shown.
     """
     if oauth_token is None:
         raise gr.Error("Sign in with your Hugging Face account first.")
+    # Trim stray whitespace from the textboxes — a leading/trailing space in a
+    # repo id is an easy copy-paste mistake that would otherwise 404 the source.
+    source_repo = (source_repo or "").strip()
+    target_repo = (target_repo or "").strip()
+    task = (task or "").strip()
     if not (source_repo and target_repo and task):
         raise gr.Error("Fill in source repo, target repo and task.")
 
@@ -215,25 +225,33 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     start = time.time()
     frac, label = 0.02, "checking"
     NOBTN = gr.update()  # leave a button as-is
+    SHOW = gr.update(visible=True)
     HIDE = gr.update(visible=False)
     retry_ctx = None  # set when a push fails but the built dataset is reusable
 
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", branch_btn=NOBTN, retry_btn=NOBTN):
-        # 6 outputs: bar, log, summary, branch button, retry button, retry state.
+    def view(summary="", branch_btn=NOBTN, retry_btn=NOBTN,
+             run_btn=NOBTN, stop_btn=NOBTN, reset_btn=NOBTN):
+        # 9 outputs: bar, log, summary, branch btn, retry btn, retry state,
+        # run btn, stop btn, reset btn.
         return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
-                summary, branch_btn, retry_btn, retry_ctx)
+                summary, branch_btn, retry_btn, retry_ctx,
+                run_btn, stop_btn, reset_btn)
 
     # ---- Pre-flight (synchronous, fast) ---------------------------------
     logs.append("Checking repo access…")
-    yield view(branch_btn=HIDE, retry_btn=HIDE)  # fresh run: clear leftover buttons/state
+    # Fresh run: clear leftover buttons/state and put Run/Stop back (in case a
+    # previous run finished and the user reached here via Reset → Run).
+    yield view(branch_btn=HIDE, retry_btn=HIDE, run_btn=SHOW, stop_btn=SHOW, reset_btn=HIDE)
     api = HfApi(token=token)
     exists, _writable, err = _preflight(api, source_repo, target_repo)
     if err:
         logs.append(err)
-        yield (_bar(0, "error"), render(), _error_card(err), HIDE, HIDE, retry_ctx)
+        # Recoverable: keep Run/Stop so the user can fix the inputs and re-run.
+        frac, label = 0.0, "error"
+        yield view(summary=_error_card(err), branch_btn=HIDE, retry_btn=HIDE, reset_btn=HIDE)
         return
     logs.append("  ✓ source readable")
     logs.append(f"  ✓ write access to '{target_repo.split('/')[0]}'")
@@ -250,8 +268,9 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
             f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
         )
         frac, label = 0.05, "target exists"
-        yield (_bar(frac, "target exists"), render(), warn,
-               gr.update(visible=True), HIDE, retry_ctx)
+        # Recoverable: keep Run/Stop (re-run after editing the target) alongside
+        # the "push to a branch" button.
+        yield view(summary=warn, branch_btn=SHOW, retry_btn=HIDE, reset_btn=HIDE)
         return
     else:
         logs.append(f"  ✓ target '{target_repo}' exists — will push to a branch")
@@ -284,11 +303,12 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
                 # consumed: SLAM runs RGB-D on the LEFT image + depth, and the
                 # dataset uses the Arducam raw_video. Skipping it cuts a whole
                 # mono H.264 stream per episode out of the download for free.
-                ignore = ["*oakd_right.mp4", "*oakd_right_timestamps.json"]
+                ignore = [] if include_right else ["*oakd_right.mp4", "*oakd_right_timestamps.json"]
                 try:
                     info = api.repo_info(source_repo, repo_type="dataset", files_metadata=True)
-                    skip = [s for s in info.siblings
-                            if s.rfilename.endswith(("oakd_right.mp4", "oakd_right_timestamps.json"))]
+                    skip = [] if include_right else [
+                        s for s in info.siblings
+                        if s.rfilename.endswith(("oakd_right.mp4", "oakd_right_timestamps.json"))]
                     mb = sum((s.size or 0) for s in info.siblings) / 1e6
                     mb_skip = sum((s.size or 0) for s in skip) / 1e6
                     print(f"Downloading {source_repo} — {len(info.siblings) - len(skip)} files, "
@@ -350,11 +370,14 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
             msg = _error_card(
                 f"Push failed: {err}\n\nThe dataset is built and cached — click "
                 f"“Retry push” to push it again without re-running SLAM.")
-            yield (_bar(frac, "push failed"), render(), msg, HIDE,
-                   gr.update(visible=True), retry_ctx)
+            label = "push failed"
+            yield view(summary=msg, branch_btn=HIDE, retry_btn=SHOW,
+                       run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
         else:
-            yield (_bar(frac, "failed"), render(),
-                   _error_card(f"Pipeline failed: {err}"), HIDE, HIDE, retry_ctx)
+            label = "failed"
+            yield view(summary=_error_card(f"Pipeline failed: {err}"),
+                       branch_btn=HIDE, retry_btn=HIDE,
+                       run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
         return
 
     n = result["n"]
@@ -362,8 +385,9 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
     mode = result.get("mode")
     logs.append(f"✅ Done — {n} episode(s).")
     frac, label = 1.0, "done"
-    yield (_bar(1.0, "done"), render(), _success_summary(target_repo, n, link, mode),
-           HIDE, HIDE, retry_ctx)
+    yield view(summary=_success_summary(target_repo, n, link, mode),
+               branch_btn=HIDE, retry_btn=HIDE,
+               run_btn=HIDE, stop_btn=HIDE, reset_btn=SHOW)
 
 
 def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
@@ -379,14 +403,18 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     logs: list[str] = []
     start = time.time()
     frac, label = 0.95, "pushing"
+    NOBTN = gr.update()
+    SHOW = gr.update(visible=True)
     HIDE = gr.update(visible=False)
 
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", retry_btn=gr.update(), ctx=retry_ctx):
+    def view(summary="", retry_btn=NOBTN, reset_btn=NOBTN, ctx=retry_ctx):
+        # Run/Stop stay hidden throughout a retry (we got here from a finished
+        # run). Same 9-output shape as _run.
         return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
-                summary, HIDE, retry_btn, ctx)
+                summary, HIDE, retry_btn, ctx, HIDE, HIDE, reset_btn)
 
     logs.append("Retrying push (dataset already built — skipping SLAM)…")
     yield view(retry_btn=HIDE)  # hide while this retry runs (avoid double-click)
@@ -432,10 +460,11 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
 
     if "error" in result:
         err = result["error"]
-        # Keep the dataset cached and the retry button up for another attempt.
-        yield (_bar(frac, "push failed"), render(),
-               _error_card(f"Push failed again: {err}"),
-               HIDE, gr.update(visible=True), retry_ctx)
+        # Keep the dataset cached and the retry button up for another attempt;
+        # Reset stays available too.
+        label = "push failed"
+        yield view(summary=_error_card(f"Push failed again: {err}"),
+                   retry_btn=SHOW, reset_btn=SHOW, ctx=retry_ctx)
         return
 
     n = result["n"]
@@ -443,16 +472,31 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     mode = result.get("mode")
     logs.append(f"✅ Pushed — {n} episode(s).")
     frac, label = 1.0, "done"
-    yield (_bar(1.0, "done"), render(),
-           _success_summary(retry_ctx["target_repo"], n, link, mode), HIDE, HIDE, None)
+    yield view(summary=_success_summary(retry_ctx["target_repo"], n, link, mode),
+               retry_btn=HIDE, reset_btn=SHOW, ctx=None)
 
 
-def run_pipeline(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=False)
+def run_pipeline(source_repo, target_repo, task, include_right,
+                 oauth_token: gr.OAuthToken | None = None):
+    yield from _run(source_repo, target_repo, task, include_right, oauth_token, to_branch=False)
 
 
-def run_pipeline_branch(source_repo, target_repo, task, oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=True)
+def run_pipeline_branch(source_repo, target_repo, task, include_right,
+                        oauth_token: gr.OAuthToken | None = None):
+    yield from _run(source_repo, target_repo, task, include_right, oauth_token, to_branch=True)
+
+
+def reset():
+    """Reset to the initial state: clear log/summary/bar, hide the branch/retry/
+    reset buttons, and bring Run/Stop back. Inputs (source/target/task) are kept
+    so the user can tweak and re-run. Outputs match the `outputs` list order."""
+    return (_bar(0, "ready"), "", "",
+            gr.update(visible=False),  # branch button
+            gr.update(visible=False),  # retry button
+            None,                      # retry state
+            gr.update(visible=True),   # run button
+            gr.update(visible=True),   # stop button
+            gr.update(visible=False))  # reset button
 
 
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
@@ -481,6 +525,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
                                 placeholder="your-account/grabette-demo")
             task = gr.Textbox(label="Task description", placeholder="cup manipulation")
+            # The right OAK camera is never used by SLAM (RGB-D = left + depth);
+            # off by default so it isn't downloaded — see the _run worker.
+            include_right = gr.Checkbox(
+                value=False, label="Download right OAK camera",
+                info="Unused by SLAM (left + depth); leave off for a faster download.")
             with gr.Row():
                 btn = gr.Button("▶  Run", variant="primary", scale=3)
                 stop_btn = gr.Button("■  Stop", variant="stop", scale=1)
@@ -490,6 +539,8 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             # Revealed only when a build succeeded but the push failed (see _run).
             retry_btn = gr.Button("⟳  Retry push", variant="secondary",
                                   size="sm", visible=False)
+            # Replaces Run/Stop once a run reaches a terminal state (see _run).
+            reset_btn = gr.Button("↺  Reset", variant="secondary", visible=False)
             # Holds the built-but-unpushed dataset context for retry_push.
             retry_state = gr.State(None)
         # ---- Outputs (right) ----
@@ -499,11 +550,16 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                  elem_id="logbox")
             summary_out = gr.Markdown()
 
-    outputs = [bar, log_out, summary_out, confirm_branch_btn, retry_btn, retry_state]
-    run_event = btn.click(run_pipeline, inputs=[source, target, task], outputs=outputs)
-    branch_event = confirm_branch_btn.click(run_pipeline_branch, inputs=[source, target, task],
+    outputs = [bar, log_out, summary_out, confirm_branch_btn, retry_btn, retry_state,
+               btn, stop_btn, reset_btn]
+    run_event = btn.click(run_pipeline, inputs=[source, target, task, include_right],
+                          outputs=outputs)
+    branch_event = confirm_branch_btn.click(run_pipeline_branch,
+                                            inputs=[source, target, task, include_right],
                                             outputs=outputs)
     retry_event = retry_btn.click(retry_push, inputs=[retry_state], outputs=outputs)
+    # Reset: clear outputs and bring Run/Stop back after a terminal state.
+    reset_btn.click(reset, inputs=None, outputs=outputs)
     # Stop: cancel whichever generator is streaming (frees the UI at once) and
     # signal the worker to abandon the run (skip remaining episodes + the push).
     stop_btn.click(_request_stop, inputs=None, outputs=None,
