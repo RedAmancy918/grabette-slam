@@ -8,6 +8,7 @@ Gradio auto-injects the gr.OAuthToken parameter — it is NOT a UI input.
 import contextlib
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -93,6 +94,15 @@ def _btns(state, *, paused=False, cancel_pending=False,
     return (branch_u, retry_u, run_u, pause_u, cancel_u, confirm_u, keep_u, reset_u)
 
 
+def _io(state, bar_html, log_text):
+    """Updates for the progress bar + log box: shown only while running/paused
+    (state == 'running'), hidden when idle or finished. Returns 2 updates in
+    `outputs` order (bar, log)."""
+    show = state == "running"
+    return (gr.update(value=bar_html, visible=show),
+            gr.update(value=log_text, visible=show))
+
+
 def _reset_view():
     """Full reset to the idle page (clears log/summary/bar, only Run shown).
     Returns the 12-output tuple.
@@ -104,7 +114,7 @@ def _reset_view():
     """
     _pause.clear()
     _cancel_pending.clear()
-    return (_bar(0, "ready"), "", "", None, *_btns("idle"))
+    return (*_io("idle", _bar(0, "ready"), ""), "", None, *_btns("idle"))
 
 
 def _visualizer_url(repo_id: str) -> str:
@@ -164,6 +174,27 @@ def _error_card(msg: str) -> str:
         'font-family:var(--font,sans-serif);white-space:pre-wrap">'
         f'{msg}</div>'
     )
+
+
+def _run_recap(logs: list[str]) -> str:
+    """A compact per-episode recap pulled from the captured log lines, appended to
+    the final summary (since the live log is hidden once a run finishes).
+
+    Keeps the lines that matter for assessing the run: SLAM tracking %, trajectory
+    quality verdicts (GOOD/WARN/BAD/FAIL), input-check flags, and failures.
+    Returns "" when there's nothing worth recapping (e.g. a push-only retry).
+    """
+    keep = []
+    for ln in logs:
+        s = ln.strip()
+        if (s.startswith("✓") and "tracking" in s) \
+                or s.startswith("✗") \
+                or s.startswith("•") \
+                or re.match(r"^\[(GOOD|WARN|BAD|FAIL|input/)", s):
+            keep.append(s)
+    if not keep:
+        return ""
+    return "\n\n**Run recap**\n```\n" + "\n".join(keep) + "\n```"
 
 
 def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> str:
@@ -311,7 +342,7 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
         # 12 outputs: bar, log, summary, retry state, then the 8 buttons.
         lbl = (f"paused · {label}" if _pause.is_set()
                else f"{label} · {int(time.time() - start)}s")
-        return (_bar(frac, lbl), render(), summary, retry_ctx,
+        return (*_io(state, _bar(frac, lbl), render()), summary, retry_ctx,
                 *_btns(state, paused=_pause.is_set(),
                        cancel_pending=_cancel_pending.is_set(),
                        branch=branch, retry=retry))
@@ -449,10 +480,11 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
                 f"Push failed: {err}\n\nThe dataset is built and cached — click "
                 f"“Retry push” to push it again without re-running SLAM.")
             label = "push failed"
-            yield view(summary=msg, state="finished", retry=True)
+            yield view(summary=msg + _run_recap(logs), state="finished", retry=True)
         else:
             label = "failed"
-            yield view(summary=_error_card(f"Pipeline failed: {err}"), state="finished")
+            yield view(summary=_error_card(f"Pipeline failed: {err}") + _run_recap(logs),
+                       state="finished")
         return
 
     n = result["n"]
@@ -460,7 +492,8 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     mode = result.get("mode")
     logs.append(f"✅ Done — {n} episode(s).")
     frac, label = 1.0, "done"
-    yield view(summary=_success_summary(target_repo, n, link, mode), state="finished")
+    yield view(summary=_success_summary(target_repo, n, link, mode) + _run_recap(logs),
+               state="finished")
 
 
 def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
@@ -487,7 +520,7 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     def view(summary="", *, state="running", retry=False, ctx=retry_ctx):
         # 12-output shape, same as _run. A push can't be paused, so allow_pause
         # is False; Cancel still works (abandons the retry).
-        return (_bar(frac, f"{label} · {int(time.time() - start)}s"), render(),
+        return (*_io(state, _bar(frac, f"{label} · {int(time.time() - start)}s"), render()),
                 summary, ctx,
                 *_btns(state, cancel_pending=_cancel_pending.is_set(),
                        retry=retry, allow_pause=False))
@@ -634,9 +667,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             retry_state = gr.State(None)
         # ---- Outputs (right) ----
         with gr.Column(scale=3, min_width=280):
-            bar = gr.HTML(_bar(0, "ready"))
+            # Bar + log are revealed only while a run is in progress (running /
+            # paused); the generators toggle their visibility via _io().
+            bar = gr.HTML(_bar(0, "ready"), visible=False)
             log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
-                                 elem_id="logbox")
+                                 elem_id="logbox", visible=False)
             summary_out = gr.Markdown()
 
     # Order MUST match the generators' yields: (bar, log, summary, retry_state)
