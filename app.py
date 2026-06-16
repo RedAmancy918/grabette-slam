@@ -99,14 +99,6 @@ def _error_card(msg: str) -> str:
 def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> str:
     """Final success card — same for a first-try push and a retried push."""
     ds_url = f"https://huggingface.co/datasets/{target_repo}"
-    # SLAM trajectory recordings shipped inside the dataset (meta/slam_viz/),
-    # one .rrd per episode — download and inspect the 3D path + camera frame
-    # with `rerun meta/slam_viz/<episode>.rrd`.
-    rrd_note = (
-        f"- **Check the SLAM trajectory:** each episode's 3D path + camera frame "
-        f"is saved under `meta/slam_viz/<episode>.rrd` in the dataset — download "
-        f"and open with `rerun <file>.rrd`.\n"
-    )
     if mode == "branch":
         return (
             f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
@@ -115,15 +107,13 @@ def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> s
             f"untouched.)_\n"
             f"- **Branch:** 👉 [{link}]({link}) 👈\n"
             f"- Review it there, then merge the branch into `main` (git / API) when ready.\n"
-            f"{rrd_note}"
         )
     viz_url = _visualizer_url(target_repo)
     # The LeRobot visualizer sends X-Frame-Options: deny, so link out.
     return (
         f"### ✅ Done — {n} episode(s)\n"
         f"- **Dataset:** [{target_repo}]({ds_url})\n"
-        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n"
-        f"{rrd_note}\n"
+        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
         f"_(The visualizer needs the dataset to be public.)_"
     )
 
@@ -290,14 +280,26 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
             with contextlib.redirect_stdout(writer):
                 q.put(("progress", 0.07, "download"))
                 work = Path(tempfile.mkdtemp())
+                # The right OAK camera (oakd_right.mp4) is recorded but never
+                # consumed: SLAM runs RGB-D on the LEFT image + depth, and the
+                # dataset uses the Arducam raw_video. Skipping it cuts a whole
+                # mono H.264 stream per episode out of the download for free.
+                ignore = ["*oakd_right.mp4", "*oakd_right_timestamps.json"]
                 try:
                     info = api.repo_info(source_repo, repo_type="dataset", files_metadata=True)
+                    skip = [s for s in info.siblings
+                            if s.rfilename.endswith(("oakd_right.mp4", "oakd_right_timestamps.json"))]
                     mb = sum((s.size or 0) for s in info.siblings) / 1e6
-                    print(f"Downloading {source_repo} — {len(info.siblings)} files, {mb:.0f} MB…")
+                    mb_skip = sum((s.size or 0) for s in skip) / 1e6
+                    print(f"Downloading {source_repo} — {len(info.siblings) - len(skip)} files, "
+                          f"{mb - mb_skip:.0f} MB"
+                          + (f" (skipping {mb_skip:.0f} MB of unused right-camera video)"
+                             if mb_skip else "") + "…")
                 except Exception:
                     print(f"Downloading {source_repo}…")
                 raw = snapshot_download(source_repo, repo_type="dataset",
                                         local_dir=work / "raw", token=token,
+                                        ignore_patterns=ignore,
                                         max_workers=16)  # raw episodes are many small depth PNGs
                 print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))

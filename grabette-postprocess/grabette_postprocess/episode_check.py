@@ -70,11 +70,16 @@ def _dupes(values: list, n_check: int = 200) -> float:
     return 100.0 * dupes / m
 
 
-def check_episode(ep_dir: Path) -> dict:
+def check_episode(ep_dir: Path, require_right: bool = True) -> dict:
     """Check one raw episode directory, return a status dict.
 
     Keys: name, errors, warnings, info (lists of strings), and optionally
     trajectory (a "traj:tracked/total (pct%)" string if SLAM already ran).
+
+    require_right: when False, the right OAK camera is not checked at all. The
+    pipeline never consumes oakd_right.mp4 (SLAM is RGB-D on left+depth), so a
+    caller that intentionally skips downloading it (e.g. the Space) sets this to
+    avoid a spurious "missing oakd_right.mp4" error.
     """
     ep_dir = Path(ep_dir)
     status = {"name": ep_dir.name, "errors": [], "warnings": [], "info": []}
@@ -110,7 +115,7 @@ def check_episode(ep_dir: Path) -> dict:
                     warn.append(d)
 
     # --- OAK RGBD ---------------------------------------------------------
-    for side in ("left", "right"):
+    for side in (("left", "right") if require_right else ("left",)):
         mp4 = ep_dir / f"oakd_{side}.mp4"
         ts_path = ep_dir / f"oakd_{side}_timestamps.json"
         if not mp4.is_file():
