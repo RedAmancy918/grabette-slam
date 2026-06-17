@@ -961,7 +961,10 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                                   variant="secondary", size="sm").click(
                             _restore_episodes, inputs=None, outputs=review_state)
 
-            summary_out = gr.Markdown()
+            # line_breaks=True so a single "\n" in a summary/warning renders as a
+            # line break (GFM soft breaks) — plain Markdown would collapse it to a
+            # space and only "\n\n" (a full paragraph gap) would show.
+            summary_out = gr.Markdown(line_breaks=True)
 
     # Order MUST match the generators' yields: (bar, log, summary, retry_state),
     # the 8 buttons from _btns() (branch, retry, run, pause, cancel,
