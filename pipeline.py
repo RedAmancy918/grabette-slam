@@ -27,14 +27,16 @@ def find_episode_dirs(root: Path) -> list[Path]:
     return sorted({p.parent for p in Path(root).rglob("oakd_left.mp4")})
 
 
-def _process_episode(ep: Path, gate=None) -> tuple[Path | None, list[str]]:
+def _process_episode(ep: Path, gate=None):
     """Convert + SLAM + quality-check one episode (runs in a worker thread).
 
-    Returns (episode_dir | None, log_lines). The dir is None when SLAM produced
-    no trajectory (the episode is dropped). Log lines are collected rather than
-    emitted directly so concurrent episodes don't interleave in the output.
-    The trajectory quality check is advisory: a BAD/WARN verdict is logged but
-    the episode is still kept.
+    Returns (episode_dir | None, log_lines, report | None). The dir is None when
+    SLAM produced no trajectory (the episode is dropped outright) — report is then
+    None too. Log lines are collected rather than emitted directly so concurrent
+    episodes don't interleave in the output. The trajectory quality check is
+    advisory at this stage: a BAD/WARN verdict is logged and the report returned,
+    so the caller can offer the user a chance to drop flagged episodes before the
+    dataset is built (see build_lerobot's `review` hook).
 
     gate: optional no-arg callable invoked at the start; it blocks while the run
     is paused (cooperative pause checkpoint). An episode already running its SLAM
@@ -62,10 +64,11 @@ def _process_episode(ep: Path, gate=None) -> tuple[Path | None, list[str]]:
     r = run_oak_slam(ep, binary=BINARY, show_progress=False)
     if r.trajectory_path is None:
         lines.append(f"  ✗ {ep.name}: SLAM failed (rc={r.returncode})")
-        return None, lines
+        return None, lines, None
     lines.append(f"  ✓ {ep.name}: tracking {r.tracking_pct:.1f}% ({r.tracked_frames}/{r.total_frames})")
 
-    # Advisory trajectory quality check — flags drift/jumps/zigzag but never drops.
+    # Trajectory quality check — flags drift/jumps/zigzag. The verdict is returned
+    # so the caller can let the user drop flagged episodes (build_lerobot review).
     report = analyze_trajectory(r.trajectory_path, ep / "slam_metadata.json")
     lines.append(
         f"  [{report.verdict}] {ep.name}: dist={report.total_distance_m:.2f}m "
@@ -73,12 +76,17 @@ def _process_episode(ep: Path, gate=None) -> tuple[Path | None, list[str]]:
     )
     for msg in (*report.errors, *report.warnings):
         lines.append(f"      • {msg}")
-    return ep, lines
+    return ep, lines, report
 
 
 def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None,
-             gate=None) -> list[Path]:
-    """Convert + SLAM every episode in parallel. Returns dirs that produced a trajectory.
+             gate=None) -> list[tuple[Path, "TrajectoryReport"]]:
+    """Convert + SLAM every episode in parallel.
+
+    Returns a list of (episode_dir, trajectory_report) for every episode that
+    produced a trajectory, sorted by episode name. Episodes whose SLAM failed are
+    dropped outright (not returned). The report carries the quality verdict so the
+    caller can offer the user a chance to drop flagged episodes before building.
 
     Episodes are independent (each reads/writes only its own dir), so they run
     concurrently. SLAM is a single-threaded CPU-bound subprocess, so workers are
@@ -109,15 +117,15 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None,
                 log("⛔ Stop requested — abandoning remaining episodes")
                 pool.shutdown(wait=False, cancel_futures=True)
                 break
-            ep, lines = fut.result()
+            ep, lines, report = fut.result()
             for line in lines:
                 log(line)
             if ep is not None:
-                processed.append(ep)
+                processed.append((ep, report))
             done += 1
             if on_progress:
                 on_progress(done, total, "slam")
-    return sorted(processed)
+    return sorted(processed, key=lambda t: t[0].name)
 
 
 def _branch_name(task: str) -> str:
@@ -173,7 +181,7 @@ def _push_to_branch(ds, target_repo, branch, log, token, attempts=3):
 
 def build_lerobot(dataset_dir, target_repo, task, root, log=print,
                   should_stop=None, to_branch=False, on_progress=None,
-                  token=None, gate=None) -> list:
+                  token=None, gate=None, review=None) -> list:
     """Convert + SLAM + build the LeRobot dataset on disk under `root`.
 
     Returns the list of processed episode dirs. Does NOT push — call push_lerobot()
@@ -186,18 +194,34 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         the per-episode traceability sidecar when to_branch is set).
     gate: optional no-arg pause checkpoint; honored per episode during SLAM and
         once more before the build step.
+    review: optional callback(results) -> list[Path], called between SLAM and the
+        build with the list of (episode_dir, trajectory_report) tuples. It returns
+        the episode dirs to keep — letting the caller drop episodes whose
+        trajectory check came back flagged. When None, every episode is kept.
     """
     import os
 
     if token:
         os.environ["HF_TOKEN"] = token
 
-    processed = run_slam(dataset_dir, log=log, should_stop=should_stop,
-                         on_progress=on_progress, gate=gate)
+    results = run_slam(dataset_dir, log=log, should_stop=should_stop,
+                       on_progress=on_progress, gate=gate)
+    if should_stop and should_stop():
+        raise RuntimeError("Stopped by user — nothing pushed.")
+    if not results:
+        raise RuntimeError("No episode produced a trajectory; nothing to push.")
+
+    # Episode review: let the caller drop flagged episodes before building. The
+    # callback may block (e.g. waiting on user input) — keep it after the stop
+    # check above so a cancel during SLAM never reaches it.
+    if review is not None:
+        processed = review(results)
+    else:
+        processed = [ep for ep, _ in results]
     if should_stop and should_stop():
         raise RuntimeError("Stopped by user — nothing pushed.")
     if not processed:
-        raise RuntimeError("No episode produced a trajectory; nothing to push.")
+        raise RuntimeError("All episodes were dropped in review — nothing to push.")
     if gate:
         gate()  # pause checkpoint before the (CPU-heavy) build
 
