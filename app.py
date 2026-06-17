@@ -333,12 +333,18 @@ def _bar(frac: float, label: str) -> str:
 
 def _error_card(msg: str) -> str:
     """A red-background error card for the summary slot — shown instead of raising
-    gr.Error, which would stamp an "Error" badge on every output component."""
+    gr.Error, which would stamp an "Error" badge on every output component.
+
+    The card lives in a gr.Markdown, so newlines in `msg` are turned into <br>:
+    a literal blank line would otherwise terminate the inline-HTML block (a
+    CommonMark rule) and the text after it would escape the styled div. html.escape
+    keeps arbitrary exception/repo text from breaking the markup."""
+    safe = html.escape(msg).replace("\n", "<br>")
     return (
         '<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;'
         'padding:12px 16px;color:#991b1b;font-weight:500;'
-        'font-family:var(--font,sans-serif);white-space:pre-wrap">'
-        f'{msg}</div>'
+        'font-family:var(--font,sans-serif)">'
+        f'{safe}</div>'
     )
 
 
@@ -407,13 +413,13 @@ def _preflight(api, source_repo, target_repo):
         api.repo_info(source_repo, repo_type="dataset")
     except RepositoryNotFoundError:
         return None, None, (
-            f"Error on the source dataset '{source_repo}':\n\nEither it doesn't exist, or it's private and "
-            f"your account can't see it.\n\nCheck the spelling; it should look like "
+            f"Error on the source dataset '{source_repo}':\nEither it doesn't exist, or it's private and "
+            f"your account can't see it.\nCheck the spelling; it should look like "
             f"'username/dataset-name'."
         )
     except GatedRepoError:
         return None, None, (
-            f"Error on the source dataset '{source_repo}':\n\nIt is gated. Accept its access terms on "
+            f"Error on the source dataset '{source_repo}':\nIt is gated. Accept its access terms on "
             f"the Hub first, then re-run."
         )
     except Exception as e:
@@ -453,14 +459,14 @@ def _preflight(api, source_repo, target_repo):
             role = org_roles[ns] or "read-only"
             return exists, False, (
                 f"Your role in the '{ns}' org is '{role}', which can't write "
-                f"datasets : so you can't {verb} '{target_repo}'. \n\nAsk an org admin "
+                f"datasets : so you can't {verb} '{target_repo}'. \nAsk an org admin "
                 f"for write access, or set the target to a namespace you own."
             )
         who = f"'{username}'" + (
             f" (orgs: {', '.join(sorted(org_roles))})" if org_roles else " (no orgs)")
         return exists, False, (
             f"You don't have write access to namespace '{ns}', so you can't "
-            f"{verb} '{target_repo}'.\n\n You're signed in as {who} : set the target "
+            f"{verb} '{target_repo}'.\nYou're signed in as {who} : set the target "
             f"to a namespace you own."
         )
 
@@ -552,7 +558,7 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
         logs.append(f"Target '{target_repo}' already exists")
         warn = (
             f"### ⚠️ Target dataset already exists\n"
-            f"`{target_repo}` already exists on the Hub.\n\nTo avoid overwriting it, "
+            f"`{target_repo}` already exists on the Hub.\nTo avoid overwriting it, "
             f"click **Push to a new branch** below: your result lands on a "
             f"`grabette-…` branch and `main` is left untouched.\n\n"
             f"_(Want a different target instead? Click **Reset** and change it.)_"
