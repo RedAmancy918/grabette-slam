@@ -116,7 +116,9 @@ def _btns(state, *, paused=False, cancel_pending=False,
 
     state: 'idle' (only Run, enabled), 'running' (Run greyed 'Running' + Pause +
     Cancel, or the confirm/keep pair when a cancel is pending), or 'finished'
-    (only Reset). branch/retry reveal those two extra buttons.
+    (only Reset). retry reveals the retry button. branch=True is the "target already
+    exists" case: Run is replaced by the "Push to a new branch" button (primary) and
+    Reset is offered so the user can edit the target instead.
     """
     H = gr.update(visible=False)
     branch_u = gr.update(visible=branch)
@@ -139,8 +141,16 @@ def _btns(state, *, paused=False, cancel_pending=False,
         run_u = pause_u = cancel_u = confirm_u = keep_u = H
         reset_u = gr.update(visible=True)
     else:  # idle
-        run_u = gr.update(visible=True, interactive=True, value="▶  Run")
-        pause_u = cancel_u = confirm_u = keep_u = reset_u = H
+        if branch:
+            # Target exists: hide Run (it would just re-trigger this warning); the
+            # branch button (branch_u) is the primary action, and Reset lets the
+            # user go back to edit the target.
+            run_u = H
+            reset_u = gr.update(visible=True)
+        else:
+            run_u = gr.update(visible=True, interactive=True, value="▶  Run")
+            reset_u = H
+        pause_u = cancel_u = confirm_u = keep_u = H
     return (branch_u, retry_u, run_u, pause_u, cancel_u, confirm_u, keep_u, reset_u)
 
 
@@ -200,25 +210,25 @@ def _issues(it: dict) -> list[tuple[str, str]]:
     """
     out: list[tuple[str, str]] = []
     if it["n_tracked"] < 2:
-        out.append((f"{it['n_tracked']} frame(s) suivie(s)",
-                    "SLAM n'a quasiment rien suivi — trajectoire inexploitable."))
+        out.append((f"{it['n_tracked']} tracked frame(s)",
+                    "SLAM tracked almost nothing — unusable trajectory."))
         return out
     avg_speed = it["total_distance_m"] / max(it["duration_s"], 0.1)
     if avg_speed > 2.0:
-        out.append((f"vitesse {avg_speed:.1f} m/s",
-                    "Vitesse moyenne irréaliste pour un gripper — souvent de la dérive."))
+        out.append((f"speed {avg_speed:.1f} m/s",
+                    "Unrealistic average speed for a gripper — usually drift."))
     if it["median_step_mm"] > 15 and it["median_angle_deg"] < 5:
-        out.append((f"dérive · pas médian {it['median_step_mm']:.0f} mm",
-                    "Mouvement en ligne droite trop régulier — dérive IMU probable."))
+        out.append((f"drift · median step {it['median_step_mm']:.0f} mm",
+                    "Suspiciously straight, steady motion — likely IMU drift."))
     if it["n_jumps"] > 5 and it["median_angle_deg"] > 90:
-        out.append((f"zigzag · {it['n_jumps']} sauts",
-                    "Sauts avec inversions de direction — relocalisations ratées."))
+        out.append((f"zigzag · {it['n_jumps']} jumps",
+                    "Jumps with direction reversals — failed relocalizations."))
     elif it["n_jumps"] > it["n_tracked"] * 0.1:
-        out.append((f"{it['n_jumps']} sauts > 50 mm",
-                    "Bonds de position brusques — tracking instable."))
+        out.append((f"{it['n_jumps']} jumps > 50 mm",
+                    "Abrupt position jumps — unstable tracking."))
     if it["tracking_pct"] < 50:
         out.append((f"tracking {it['tracking_pct']:.0f}%",
-                    "SLAM a perdu la caméra sur une grande partie de l'épisode."))
+                    "SLAM lost the camera over much of the episode."))
     if not out:
         for msg in it.get("messages", []):
             out.append((msg, ""))
@@ -379,7 +389,7 @@ def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> s
     return (
         f"### ✅ Done — {n} episode(s)\n"
         f"- **Dataset:** [{target_repo}]({ds_url})\n"
-        f"- **Visualize:** 👉 [open in LeRobot visualizer]({viz_url}) 👈\n\n"
+        f"- **Visualize:** [open in LeRobot visualizer]({viz_url})\n\n"
         f"_(The visualizer needs the dataset to be public.)_"
     )
 
@@ -397,13 +407,13 @@ def _preflight(api, source_repo, target_repo):
         api.repo_info(source_repo, repo_type="dataset")
     except RepositoryNotFoundError:
         return None, None, (
-            f"Error on the source dataset '{source_repo}':\nEither it doesn't exist, or it's private and "
-            f"your account can't see it.\nCheck the spelling; it should look like "
+            f"Error on the source dataset '{source_repo}':\n\nEither it doesn't exist, or it's private and "
+            f"your account can't see it.\n\nCheck the spelling; it should look like "
             f"'username/dataset-name'."
         )
     except GatedRepoError:
         return None, None, (
-            f"Error on the source dataset '{source_repo}':\nIt is gated. Accept its access terms on "
+            f"Error on the source dataset '{source_repo}':\n\nIt is gated. Accept its access terms on "
             f"the Hub first, then re-run."
         )
     except Exception as e:
@@ -443,14 +453,14 @@ def _preflight(api, source_repo, target_repo):
             role = org_roles[ns] or "read-only"
             return exists, False, (
                 f"Your role in the '{ns}' org is '{role}', which can't write "
-                f"datasets — so you can't {verb} '{target_repo}'. Ask an org admin "
+                f"datasets : so you can't {verb} '{target_repo}'. \n\nAsk an org admin "
                 f"for write access, or set the target to a namespace you own."
             )
         who = f"'{username}'" + (
             f" (orgs: {', '.join(sorted(org_roles))})" if org_roles else " (no orgs)")
         return exists, False, (
             f"You don't have write access to namespace '{ns}', so you can't "
-            f"{verb} '{target_repo}'. You're signed in as {who} — set the target "
+            f"{verb} '{target_repo}'.\n\n You're signed in as {who} : set the target "
             f"to a namespace you own."
         )
 
@@ -542,10 +552,10 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
         logs.append(f"Target '{target_repo}' already exists")
         warn = (
             f"### ⚠️ Target dataset already exists\n"
-            f"`{target_repo}` already exists on the Hub.\nTo avoid overwriting it, "
-            f"click **Push to a new branch**:\n your result lands on a `grabette-…` "
-            f"branch and `main` is left untouched.\n\n"
-            f"_(Change the target above and re-run if you'd rather create a new dataset.)_"
+            f"`{target_repo}` already exists on the Hub.\n\nTo avoid overwriting it, "
+            f"click **Push to a new branch** below: your result lands on a "
+            f"`grabette-…` branch and `main` is left untouched.\n\n"
+            f"_(Want a different target instead? Click **Reset** and change it.)_"
         )
         frac, label = 0.05, "target exists"
         # Recoverable: back to idle (re-run after editing the target) but reveal
@@ -873,20 +883,21 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             # Idle: only Run. Running: Run greyed to 'Running', + Pause + Cancel.
             # Finished: only Reset. All visibility is driven by the generators.
             with gr.Row():
-                run_btn = gr.Button("▶  Run", variant="primary", scale=2)
-                pause_btn = gr.Button("⏸  Pause", variant="secondary",
+                run_btn = gr.Button("▶ Run", variant="primary", scale=2)
+                pause_btn = gr.Button("⏸ Pause", variant="secondary",
                                       scale=1, visible=False)
-                cancel_btn = gr.Button("✕  Cancel", variant="stop",
+                cancel_btn = gr.Button("✕ Cancel", variant="stop",
                                        scale=1, visible=False)
             # Cancel confirmation (revealed by Cancel; replaces Pause/Cancel).
             with gr.Row():
-                confirm_cancel_btn = gr.Button("✓  Confirm cancel", variant="stop",
+                confirm_cancel_btn = gr.Button("✓ Confirm cancel", variant="stop",
                                                size="sm", visible=False)
                 keep_btn = gr.Button("Keep running", variant="secondary",
                                      size="sm", visible=False)
-            # Revealed only when the target dataset already exists (see _run).
-            confirm_branch_btn = gr.Button("Push to a new branch",
-                                           variant="huggingface", size="sm", visible=False)
+            # Revealed (as the primary action, replacing Run) only when the target
+            # dataset already exists (see _run).
+            confirm_branch_btn = gr.Button("⎇  Push to a new branch",
+                                           variant="primary", visible=False)
             # Revealed only when a build succeeded but the push failed (see _run).
             retry_btn = gr.Button("⟳  Retry push", variant="secondary",
                                   size="sm", visible=False)
@@ -921,10 +932,10 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
                 dropped = set(st["dropped"])
                 kept = [it for it in items if it["name"] not in dropped]
                 gr.Markdown(
-                    f"### ⚠️ {len(items)} épisode(s) flaggé(s) par le contrôle de trajectoire\n"
-                    f"Retire ceux à exclure du dataset avec 🗑, puis **Continue**. "
-                    f"Les autres épisodes (non flaggés) sont gardés. "
-                    f"**{len(kept)}** flaggé(s) encore gardé(s)."
+                    f"### ⚠️ {len(items)} episode(s) flagged by the trajectory check\n"
+                    f"Drop those to exclude from the dataset with 🗑, then **Continue**. "
+                    f"The other episodes are kept. "
+                    f"**{len(kept)}** flagged and kept."
                 )
                 for it in items:
                     if it["name"] in dropped:

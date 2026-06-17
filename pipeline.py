@@ -6,7 +6,7 @@ Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from grabette_postprocess.convert import convert_episode
@@ -27,7 +27,7 @@ def find_episode_dirs(root: Path) -> list[Path]:
     return sorted({p.parent for p in Path(root).rglob("oakd_left.mp4")})
 
 
-def _process_episode(ep: Path, gate=None):
+def _process_episode(ep: Path):
     """Convert + SLAM + quality-check one episode (runs in a worker thread).
 
     Returns (episode_dir | None, log_lines, report | None). The dir is None when
@@ -38,12 +38,10 @@ def _process_episode(ep: Path, gate=None):
     so the caller can offer the user a chance to drop flagged episodes before the
     dataset is built (see build_lerobot's `review` hook).
 
-    gate: optional no-arg callable invoked at the start; it blocks while the run
-    is paused (cooperative pause checkpoint). An episode already running its SLAM
-    subprocess finishes first — the gate only holds episodes not yet started.
+    Pause is enforced by run_slam at dispatch time (it gates before starting each
+    episode), so a paused run never reaches this function for not-yet-started
+    episodes; one already running its SLAM subprocess finishes on its own.
     """
-    if gate:
-        gate()
     # Advisory input check — validates the raw recording (Arducam / OAK RGBD+IMU
     # / gripper angles) before SLAM. Logged, never blocks (a noisy episode can
     # still produce a usable trajectory).
@@ -97,7 +95,10 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None,
     collecting results and cancels not-yet-started episodes (a running SLAM
     finishes on its own — a subprocess can't be interrupted mid-call).
     on_progress: optional callback(done, total, "slam") fired per finished episode.
-    gate: optional no-arg pause checkpoint, passed to each episode worker.
+    gate: optional no-arg pause checkpoint. It is honored at dispatch time — before
+        each episode is submitted — NOT inside the worker, so a paused run holds
+        *between* episodes (it stops starting new ones) while any in-flight SLAM
+        subprocess finishes on its own (a subprocess can't be interrupted mid-call).
     """
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
@@ -110,21 +111,46 @@ def run_slam(dataset_dir, log=print, should_stop=None, on_progress=None,
     workers = min(total, os.cpu_count() or 2)
     processed = []
     done = 0
+    pending = iter(episodes)
+
+    def _dispatch_next():
+        """Pause/stop checkpoint, then return the next episode to start (or None when
+        drained / stopped). gate() blocks here while paused, so no NEW episode is
+        started until the user resumes — this is what makes Pause work during SLAM."""
+        if gate:
+            gate()  # blocks while paused; returns at once if a stop is requested
+        if should_stop and should_stop():
+            return None
+        return next(pending, None)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_process_episode, ep, gate) for ep in episodes]
-        for fut in as_completed(futures):
+        in_flight = set()
+        for _ in range(workers):  # prime the pool (gated, so a pause holds at start)
+            ep = _dispatch_next()
+            if ep is None:
+                break
+            in_flight.add(pool.submit(_process_episode, ep))
+
+        while in_flight:
+            finished, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                ep, lines, report = fut.result()
+                for line in lines:
+                    log(line)
+                if ep is not None:
+                    processed.append((ep, report))
+                done += 1
+                if on_progress:
+                    on_progress(done, total, "slam")
             if should_stop and should_stop():
                 log("⛔ Stop requested — abandoning remaining episodes")
                 pool.shutdown(wait=False, cancel_futures=True)
                 break
-            ep, lines, report = fut.result()
-            for line in lines:
-                log(line)
-            if ep is not None:
-                processed.append((ep, report))
-            done += 1
-            if on_progress:
-                on_progress(done, total, "slam")
+            while len(in_flight) < workers:  # refill (gated → Pause holds here)
+                ep = _dispatch_next()
+                if ep is None:
+                    break
+                in_flight.add(pool.submit(_process_episode, ep))
     return sorted(processed, key=lambda t: t[0].name)
 
 
