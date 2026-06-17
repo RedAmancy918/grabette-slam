@@ -62,13 +62,44 @@ def _keep_running():
     _cancel_pending.clear()
 
 
-def _submit_review(drop_names):
-    """'Continue' clicked during episode review: record which episodes the user
-    checked to drop and release the worker (outputs=None — like Pause/Cancel, the
-    generator re-renders from the flags on its next tick). drop_names is the
-    CheckboxGroup value: the episode names to remove from the dataset."""
-    _review_drop[:] = list(drop_names or [])
+def _drop_episode(name: str) -> dict:
+    """🗑 clicked on a flagged episode: add it to the drop set and return the fresh
+    review state so the @gr.render panel re-runs and the card disappears."""
+    if name not in _review_drop:
+        _review_drop.append(name)
+    return _review_state()
+
+
+def _restore_episodes() -> dict:
+    """'Restore all' clicked: clear the drop set (un-hide every flagged card)."""
+    _review_drop.clear()
+    return _review_state()
+
+
+def _submit_review():
+    """'Continue' clicked during episode review: release the worker. The episodes
+    to drop already live in _review_drop (set as the user clicked 🗑). outputs=None
+    — like Pause/Cancel, this only flips a flag; the worker clears _review and the
+    panel closes on the next poll."""
     _review_done.set()
+
+
+def _review_state() -> dict:
+    """Snapshot of the review panel state for the reactive @gr.render, built from
+    the worker-published flags. `open` drives whether the panel shows at all."""
+    return {"open": _review.is_set(),
+            "items": list(_review_items),
+            "dropped": list(_review_drop)}
+
+
+def _poll_review(cur: dict):
+    """gr.Timer tick: mirror the worker's review flags into the review State so the
+    reactive panel opens/closes and its drop set stays in sync. Returns gr.skip()
+    when nothing changed, so an idle session never churns the @gr.render block."""
+    nxt = _review_state()
+    if nxt == cur:
+        return gr.skip()
+    return nxt
 
 
 def _wait_if_paused():
@@ -159,28 +190,69 @@ def _inputs_view(state, *, source="", target="", task="", include_right=None):
     return (fld, fld, fld, fld, card)
 
 
-def _review_view(in_review, *, init=False):
-    """Updates for [review_group, continue_btn].
-
-    Shown only while the worker is awaiting the review decision (in_review). On the
-    tick it first appears (init), the checkbox choices are (re)built from the
-    flagged episodes and BAD/FAIL ones are pre-checked to drop (WARN left unchecked
-    — the user judges those). On later review ticks we pass ONLY visible=True so the
-    generator's re-render doesn't clobber the user's clicks (gr.update touches just
-    the props given). When not in review, both are hidden and the group is cleared.
+def _issues(it: dict) -> list[tuple[str, str]]:
+    """The trajectory metric(s) that are actually abnormal for one flagged episode,
+    each as (badge, memo). Mirrors the checks in analyze_trajectory so only the
+    parameter that fired is shown — not the full dist/step/jumps dump. memo is a
+    one-liner on what the anomaly means. Falls back to the report's own
+    error/warning text if (somehow) no check re-fires, so a flagged card is never
+    left unexplained.
     """
-    if in_review and init:
-        choices = [(it["summary"], it["name"]) for it in _review_items]
-        default_drop = [it["name"] for it in _review_items
-                        if it["verdict"] in ("BAD", "FAIL")]
-        n = len(choices)
-        return (gr.update(visible=True, choices=choices, value=default_drop,
-                          label=f"{n} episode(s) flagged — check the ones to DROP, "
-                                f"then Continue"),
-                gr.update(visible=True))
-    if in_review:
-        return (gr.update(visible=True), gr.update(visible=True))
-    return (gr.update(visible=False, value=[]), gr.update(visible=False))
+    out: list[tuple[str, str]] = []
+    if it["n_tracked"] < 2:
+        out.append((f"{it['n_tracked']} frame(s) suivie(s)",
+                    "SLAM n'a quasiment rien suivi — trajectoire inexploitable."))
+        return out
+    avg_speed = it["total_distance_m"] / max(it["duration_s"], 0.1)
+    if avg_speed > 2.0:
+        out.append((f"vitesse {avg_speed:.1f} m/s",
+                    "Vitesse moyenne irréaliste pour un gripper — souvent de la dérive."))
+    if it["median_step_mm"] > 15 and it["median_angle_deg"] < 5:
+        out.append((f"dérive · pas médian {it['median_step_mm']:.0f} mm",
+                    "Mouvement en ligne droite trop régulier — dérive IMU probable."))
+    if it["n_jumps"] > 5 and it["median_angle_deg"] > 90:
+        out.append((f"zigzag · {it['n_jumps']} sauts",
+                    "Sauts avec inversions de direction — relocalisations ratées."))
+    elif it["n_jumps"] > it["n_tracked"] * 0.1:
+        out.append((f"{it['n_jumps']} sauts > 50 mm",
+                    "Bonds de position brusques — tracking instable."))
+    if it["tracking_pct"] < 50:
+        out.append((f"tracking {it['tracking_pct']:.0f}%",
+                    "SLAM a perdu la caméra sur une grande partie de l'épisode."))
+    if not out:
+        for msg in it.get("messages", []):
+            out.append((msg, ""))
+    return out
+
+
+_VERDICT_BADGE = {
+    "FAIL": ("#7f1d1d", "#fecaca"),
+    "BAD": ("#991b1b", "#fee2e2"),
+    "WARN": ("#92400e", "#fef3c7"),
+}
+
+
+def _episode_card(it: dict) -> str:
+    """Orange flagged-episode card: name + verdict badge + only the abnormal
+    metric(s), each with a concise memo."""
+    fg, bg = _VERDICT_BADGE.get(it["verdict"], ("#92400e", "#fef3c7"))
+    rows = "".join(
+        f'<div style="margin-top:5px;font-size:12.5px;line-height:1.35">'
+        f'<b style="color:#9a3412">{html.escape(badge)}</b>'
+        + (f' — <span style="color:var(--body-text-color-subdued)">{html.escape(memo)}</span>'
+           if memo else "")
+        + '</div>'
+        for badge, memo in _issues(it))
+    return (
+        '<div style="background:#fff7ed;border:1px solid #fdba74;'
+        'border-left:4px solid #f97316;border-radius:8px;padding:9px 12px;'
+        'font-family:var(--font,sans-serif)">'
+        f'<div style="display:flex;align-items:center;gap:8px">'
+        f'<b style="font-size:13.5px">{html.escape(it["name"])}</b>'
+        f'<span style="font-size:11px;font-weight:700;padding:1px 7px;border-radius:999px;'
+        f'color:{fg};background:{bg}">{html.escape(it["verdict"])}</span></div>'
+        f'{rows}</div>'
+    )
 
 
 def _reset_view():
@@ -196,8 +268,9 @@ def _reset_view():
     _cancel_pending.clear()
     _review.clear()
     _review_done.clear()
+    _review_drop.clear()
     return (*_io("idle", _bar(0, "ready"), ""), "", None, *_btns("idle"),
-            *_inputs_view("idle"), *_review_view(False))
+            *_inputs_view("idle"))
 
 
 def _visualizer_url(repo_id: str) -> str:
@@ -284,13 +357,22 @@ def _success_summary(target_repo: str, n: int, link: str | None, mode: str) -> s
     """Final success card — same for a first-try push and a retried push."""
     ds_url = f"https://huggingface.co/datasets/{target_repo}"
     if mode == "branch":
+        # A "Sign in with HF" OAuth token can push commits (so the branch works) but
+        # is refused by the PR-creation endpoint — and HF has no "open a PR from this
+        # branch" URL (a PR is its own refs/pr/N ref, created from the Community tab
+        # or the API). So we link the branch + the New-PR page; opening the PR itself
+        # is a manual step the user's own browser session is allowed to do.
+        branch = link.rsplit("/tree/", 1)[-1] if link and "/tree/" in link else "the branch"
+        new_pr_url = f"{ds_url}/discussions/new"
         return (
             f"### ✅ Done — {n} episode(s) — pushed to a branch\n"
-            f"_(A sign-in token can't open a PR — that needs the discussions/PR "
-            f"permission — so the result was pushed to a branch, leaving `main` "
-            f"untouched.)_\n"
-            f"- **Branch:** 👉 [{link}]({link}) 👈\n"
-            f"- Review it there, then merge the branch into `main` (git / API) when ready.\n"
+            f"_(A “Sign in with HF” token can’t open a pull request — that needs the "
+            f"discussions/PR permission — so the result landed on a branch, leaving "
+            f"`main` untouched.)_\n"
+            f"- **Branch:** 👉 [`{branch}`]({link}) 👈 — review the dataset here.\n"
+            f"- **Open a PR:** [New pull request / discussion]({new_pr_url}) "
+            f"(your browser session can; the Space token can’t), then point it at "
+            f"`{branch}` — or merge the branch into `main` via git when ready.\n"
         )
     viz_url = _visualizer_url(target_repo)
     # The LeRobot visualizer sends X-Frame-Options: deny, so link out.
@@ -423,10 +505,11 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     def render() -> str:
         return "\n".join(logs)
 
-    def view(summary="", *, state="running", branch=False, retry=False,
-             review_init=False):
-        # 19 outputs: bar, log, summary, retry state, the 8 buttons, the 5
-        # inputs-view fields, then [review_group, continue_btn].
+    def view(summary="", *, state="running", branch=False, retry=False):
+        # 17 outputs: bar, log, summary, retry state, the 8 buttons, the 5
+        # inputs-view fields. The episode-review panel is a separate reactive
+        # @gr.render block driven by a gr.Timer — not part of this tuple — so it
+        # reads the worker's _review flags directly (see _poll_review).
         in_review = _review.is_set()
         lbl = ("awaiting review" if in_review
                else f"paused · {label}" if _pause.is_set()
@@ -437,8 +520,7 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
                        branch=branch, retry=retry,
                        allow_pause=not in_review),
                 *_inputs_view(state, source=source_repo, target=target_repo,
-                              task=task, include_right=include_right),
-                *_review_view(in_review, init=review_init))
+                              task=task, include_right=include_right))
 
     # ---- Pre-flight (synchronous, fast) ---------------------------------
     logs.append("Checking repo access…")
@@ -502,17 +584,18 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
             return [ep for ep, _ in results]
         _review_items[:] = [
             {"name": ep.name, "verdict": rep.verdict,
-             "summary": (f"{ep.name}  ·  [{rep.verdict}]  track={rep.tracking_pct:.0f}%  "
-                         f"dist={rep.total_distance_m:.2f}m  "
-                         f"med_step={rep.median_step_mm:.1f}mm  jumps={rep.n_jumps}")}
+             "n_tracked": rep.n_tracked, "tracking_pct": rep.tracking_pct,
+             "total_distance_m": rep.total_distance_m, "duration_s": rep.duration_s,
+             "median_step_mm": rep.median_step_mm, "median_angle_deg": rep.median_angle_deg,
+             "n_jumps": rep.n_jumps,
+             "messages": [*rep.errors, *rep.warnings]}
             for ep, rep in flagged
         ]
         _review_drop.clear()
         _review_done.clear()
         _review.set()
-        q.put(("review",))  # nudge the generator to reveal the panel promptly
         print(f"⏸ Review: {len(flagged)} of {len(results)} episode(s) flagged "
-              f"— choose which to drop, then click Continue.")
+              f"— remove the ones to drop (🗑), then click Continue.")
         while not _review_done.is_set():
             if _stop.is_set():
                 _review.clear()
@@ -583,28 +666,21 @@ def _run(source_repo, target_repo, task, include_right, oauth_token, to_branch):
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
-    review_shown = False
     while True:
         try:
             # Short timeout so Pause/Cancel button changes reflect within a tick.
             item = q.get(timeout=0.3)
-            tag = item[0]
-            if tag == "done":
-                break
-            if tag == "progress":
-                frac, label = item[1], item[2]
-            elif tag == "review":
-                pass  # just a nudge to reveal the panel on this tick
-            else:  # ("log", line)
-                logs.append(item[1])
         except queue.Empty:
-            pass  # tick the elapsed counter / reflect pause+cancel+review flags
-        # Reveal the review panel the first tick it's pending (init builds the
-        # choices + pre-checks BAD/FAIL); later ticks leave the user's clicks alone.
-        in_review = _review.is_set()
-        init = in_review and not review_shown
-        review_shown = in_review
-        yield view(review_init=init)
+            yield view()  # tick the elapsed counter / reflect pause+cancel flags
+            continue
+        tag = item[0]
+        if tag == "done":
+            break
+        if tag == "progress":
+            frac, label = item[1], item[2]
+        else:  # ("log", line)
+            logs.append(item[1])
+        yield view()
 
     t.join()
     if "error" in result:
@@ -657,16 +733,14 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
         return "\n".join(logs)
 
     def view(summary="", *, state="running", retry=False, ctx=retry_ctx):
-        # 19-output shape, same as _run. A push can't be paused, so allow_pause
-        # is False; Cancel still works (abandons the retry). A push-only retry never
-        # reviews episodes, so the review panel stays hidden.
+        # 17-output shape, same as _run. A push can't be paused, so allow_pause
+        # is False; Cancel still works (abandons the retry).
         return (*_io(state, _bar(frac, f"{label} · {int(time.time() - start)}s"), render()),
                 summary, ctx,
                 *_btns(state, cancel_pending=_cancel_pending.is_set(),
                        retry=retry, allow_pause=False),
                 *_inputs_view(state, target=retry_ctx["target_repo"],
-                              task=retry_ctx["task"]),
-                *_review_view(False))
+                              task=retry_ctx["task"]))
 
     logs.append("Retrying push (dataset already built — skipping SLAM)…")
     yield view()  # 'Running' + Cancel
@@ -763,6 +837,16 @@ CSS = """
 #logbox textarea {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                   font-size: 12px; line-height: 1.35;}
 footer {display: none !important;}
+/* Episode-review actions: orange to match the flagged-episode cards (warning),
+   not the default emerald primary. */
+.btn-orange button {background: #f97316 !important; border: none !important;
+                    color: #fff !important;}
+.btn-orange button:hover {background: #ea580c !important;}
+/* The 🗑 remove-episode button: solid red (the Soft theme renders variant="stop"
+   as a pale/outline style, so force it). */
+.btn-red button {background: #dc2626 !important; border: none !important;
+                 color: #fff !important;}
+.btn-red button:hover {background: #b91c1c !important;}
 """
 
 with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
@@ -817,26 +901,60 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
             bar = gr.HTML(_bar(0, "ready"), visible=False)
             log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
                                  elem_id="logbox", visible=False)
-            # Episode review: revealed only when SLAM flags non-GOOD trajectories.
-            # The run pauses here; checked episodes are dropped from the dataset.
-            review_group = gr.CheckboxGroup(
-                label="Flagged episodes", choices=[], visible=False,
-                info="Trajectory check flagged these. Checked = dropped from the "
-                     "pushed dataset. BAD/FAIL are pre-checked; review WARN yourself.")
-            continue_btn = gr.Button("▶  Continue (build & push kept episodes)",
-                                     variant="primary", size="sm", visible=False)
+
+            # ---- Episode review (reactive) ----
+            # When SLAM flags non-GOOD trajectories the worker pauses and publishes
+            # them; this panel lets the user drop episodes (🗑) before the dataset is
+            # built. It is NOT part of the streaming generator's outputs — a Timer
+            # mirrors the worker's _review flags into review_state, and @gr.render
+            # redraws one orange card per still-kept flagged episode. Clicking 🗑
+            # adds the episode to _review_drop and returns fresh state, so its card
+            # disappears; Continue releases the worker with whatever remains.
+            review_state = gr.State({"open": False, "items": [], "dropped": []})
+            review_timer = gr.Timer(0.5)
+
+            @gr.render(inputs=review_state)
+            def _render_review(st):
+                if not st.get("open"):
+                    return
+                items = st["items"]
+                dropped = set(st["dropped"])
+                kept = [it for it in items if it["name"] not in dropped]
+                gr.Markdown(
+                    f"### ⚠️ {len(items)} épisode(s) flaggé(s) par le contrôle de trajectoire\n"
+                    f"Retire ceux à exclure du dataset avec 🗑, puis **Continue**. "
+                    f"Les autres épisodes (non flaggés) sont gardés. "
+                    f"**{len(kept)}** flaggé(s) encore gardé(s)."
+                )
+                for it in items:
+                    if it["name"] in dropped:
+                        continue  # removed → its card has disappeared
+                    with gr.Row(equal_height=True):
+                        gr.HTML(_episode_card(it))
+                        gr.Button("🗑", size="sm", scale=0, min_width=52,
+                                  elem_classes=["btn-red"]).click(
+                            _drop_episode, inputs=gr.State(it["name"]),
+                            outputs=review_state)
+                with gr.Row():
+                    gr.Button("▶  Continue (build & push kept episodes)",
+                              size="sm", elem_classes=["btn-orange"]).click(
+                        _submit_review, inputs=None, outputs=None)
+                    if dropped:
+                        gr.Button(f"↺  Restore {len(dropped)} removed",
+                                  variant="secondary", size="sm").click(
+                            _restore_episodes, inputs=None, outputs=review_state)
+
             summary_out = gr.Markdown()
 
     # Order MUST match the generators' yields: (bar, log, summary, retry_state),
     # the 8 buttons from _btns() (branch, retry, run, pause, cancel,
-    # confirm_cancel, keep, reset), the 5 from _inputs_view() (source, target,
-    # task, include_right, selection_card), then the 2 from _review_view()
-    # (review_group, continue_btn).
+    # confirm_cancel, keep, reset), then the 5 from _inputs_view() (source, target,
+    # task, include_right, selection_card). The review panel is reactive (Timer +
+    # @gr.render), so it's deliberately NOT in this list.
     outputs = [bar, log_out, summary_out, retry_state,
                confirm_branch_btn, retry_btn,
                run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn,
-               source, target, task, include_right, selection_card,
-               review_group, continue_btn]
+               source, target, task, include_right, selection_card]
     run_event = run_btn.click(run_pipeline, inputs=[source, target, task, include_right],
                               outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
@@ -850,11 +968,10 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     pause_btn.click(_toggle_pause, inputs=None, outputs=None)
     cancel_btn.click(_request_cancel, inputs=None, outputs=None)
     keep_btn.click(_keep_running, inputs=None, outputs=None)
-    # Continue (episode review): record the checked episodes to drop + release the
-    # worker. outputs=None like Pause/Cancel — the running generator re-renders
-    # from the flags on its next tick (and hides the panel once the worker clears
-    # _review), so this never fights the stream for the same components.
-    continue_btn.click(_submit_review, inputs=[review_group], outputs=None)
+    # Mirror the worker's review flags into review_state every tick; _poll_review
+    # returns gr.skip() when nothing changed, so the @gr.render block only redraws
+    # on a real open/close or drop-set change (no churn while idle or running).
+    review_timer.tick(_poll_review, inputs=review_state, outputs=review_state)
     # Confirm cancel: first cancel the streaming generator + signal the worker to
     # abandon (outputs=None so it preempts at once), THEN reset the page to idle.
     # Split into click(cancel) → .then(reset) because a single function can't both
