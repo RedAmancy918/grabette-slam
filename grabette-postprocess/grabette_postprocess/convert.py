@@ -64,6 +64,39 @@ def _extract_depth_video(mkv_path: Path, out_dir: Path) -> int:
     return len(list(out_dir.glob("*.png")))
 
 
+def _split_imu_to_csvs(imu_json: Path, oak_dir: Path) -> tuple[int, int, int]:
+    """Split oakd_imu.json into the three CSVs offline_vslam reads
+    (imu_acc.csv, imu_gyro.csv, imu_rotation.csv). Returns (n_accel, n_gyro, n_rot).
+
+    rotation is the BNO086's fused orientation (IMU body → gravity-aligned world).
+    RTAB-Map's Odometry can take this as orientation per IMU sample and use it for
+    VIO initialization + drift constraint during rotations.
+    """
+    imu = json.loads(imu_json.read_text())["samples"]
+    n_acc = n_gyr = n_rot = 0
+    with (oak_dir / "imu_acc.csv").open("w") as f_a, \
+         (oak_dir / "imu_gyro.csv").open("w") as f_g, \
+         (oak_dir / "imu_rotation.csv").open("w") as f_r:
+        f_a.write("timestamp_ns,ax,ay,az\n")
+        f_g.write("timestamp_ns,wx,wy,wz\n")
+        f_r.write("timestamp_ns,qx,qy,qz,qw\n")
+        for s in imu:
+            kind = s.get("kind")
+            v = s.get("value")
+            ts_ns = _ms_to_ns(float(s["host_ms"]))
+            if kind == "accel" and v and len(v) >= 3:
+                f_a.write(f"{ts_ns},{v[0]},{v[1]},{v[2]}\n")
+                n_acc += 1
+            elif kind == "gyro" and v and len(v) >= 3:
+                f_g.write(f"{ts_ns},{v[0]},{v[1]},{v[2]}\n")
+                n_gyr += 1
+            elif kind == "rotation" and v and len(v) >= 4:
+                # oakd.py stores rotation as [i, j, k, real] = [qx, qy, qz, qw]
+                f_r.write(f"{ts_ns},{v[0]},{v[1]},{v[2]},{v[3]}\n")
+                n_rot += 1
+    return n_acc, n_gyr, n_rot
+
+
 def convert_episode(ep_dir: Path, force: bool = False) -> Path:
     oak_dir = ep_dir / "oak"
     if oak_dir.exists() and not force:
@@ -156,31 +189,7 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
                 f.write(f"{idx},{_ms_to_ns(host_ms)}\n")
 
     # --- Split IMU JSON → imu_acc.csv + imu_gyro.csv + imu_rotation.csv ---
-    # rotation_vector is the BNO086's fused orientation (IMU body → gravity-aligned
-    # world). RTAB-Map's Odometry can take this as orientation per IMU sample and
-    # use it for VIO initialization + drift constraint during rotations.
-    imu = json.loads(imu_json.read_text())["samples"]
-    n_acc = n_gyr = n_rot = 0
-    with (oak_dir / "imu_acc.csv").open("w") as f_a, \
-         (oak_dir / "imu_gyro.csv").open("w") as f_g, \
-         (oak_dir / "imu_rotation.csv").open("w") as f_r:
-        f_a.write("timestamp_ns,ax,ay,az\n")
-        f_g.write("timestamp_ns,wx,wy,wz\n")
-        f_r.write("timestamp_ns,qx,qy,qz,qw\n")
-        for s in imu:
-            kind = s.get("kind")
-            v = s.get("value")
-            ts_ns = _ms_to_ns(float(s["host_ms"]))
-            if kind == "accel" and v and len(v) >= 3:
-                f_a.write(f"{ts_ns},{v[0]},{v[1]},{v[2]}\n")
-                n_acc += 1
-            elif kind == "gyro" and v and len(v) >= 3:
-                f_g.write(f"{ts_ns},{v[0]},{v[1]},{v[2]}\n")
-                n_gyr += 1
-            elif kind == "rotation" and v and len(v) >= 4:
-                # oakd.py stores rotation as [i, j, k, real] = [qx, qy, qz, qw]
-                f_r.write(f"{ts_ns},{v[0]},{v[1]},{v[2]},{v[3]}\n")
-                n_rot += 1
+    n_acc, n_gyr, n_rot = _split_imu_to_csvs(imu_json, oak_dir)
 
     print(f"  oak/ written: {n} frames, {n_acc} accel, {n_gyr} gyro, {n_rot} rotation samples")
     return oak_dir
