@@ -7,9 +7,23 @@ Gradio auto-injects the gr.OAuthToken parameter — it is NOT a UI input.
 This module is just the UI: it builds the Blocks layout and wires events. The
 rendering helpers live in views.py, the streaming run generators + cooperative
 flags in controller.py, and the episode-review state + reactive panel in review.py.
+
+REST API (called by grabette devices):
+  POST /api/process  {source_repo, target_repo, task}  Authorization: Bearer <hf_token>  → {job_id}
+  GET  /api/status/{job_id}                                      → {status, log, error}
 """
 
+import contextlib
+import os
+import tempfile
+import threading
+import uuid
+from pathlib import Path
+
 import gradio as gr
+from fastapi import Header, HTTPException
+from huggingface_hub import HfApi, snapshot_download
+from pydantic import BaseModel
 
 import review
 from controller import (
@@ -119,6 +133,82 @@ with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
         confirm_cancel, inputs=None, outputs=None,
         cancels=[run_event, branch_event, retry_event])
     cancel_evt.then(reset, inputs=None, outputs=outputs)
+
+
+# ── REST API for grabette devices ────────────────────────────────────────────
+# Headless pipeline calls: grabette uploads a raw dataset then POSTs here.
+# No review callbacks — unattended run, bad episodes are skipped automatically.
+
+_rest_jobs: dict[str, dict] = {}  # job_id → {status, log, error}
+
+
+class _ProcessReq(BaseModel):
+    source_repo: str
+    target_repo: str
+    task: str
+
+
+def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
+                            task: str, token: str) -> None:
+    """Run the pipeline synchronously in a background thread (no review gates)."""
+    logs: list[str] = []
+
+    def log(msg: str) -> None:
+        logs.append(msg)
+        _rest_jobs[job_id]["log"] = "\n".join(logs)
+
+    try:
+        os.environ["HF_TOKEN"] = token
+        api = HfApi(token=token)
+        log(f"Downloading {source_repo}…")
+        work = Path(tempfile.mkdtemp())
+        raw = snapshot_download(source_repo, repo_type="dataset",
+                                local_dir=work / "raw", token=token,
+                                max_workers=48)
+        log("Download complete. Running SLAM + LeRobot conversion…")
+        ds_root = work / "lerobot"
+        with contextlib.redirect_stdout(type("W", (), {"write": lambda s, m: log(m.rstrip()) or None, "flush": lambda s: None})()): # noqa: E501
+            from pipeline import build_lerobot, push_lerobot
+            processed = build_lerobot(raw, target_repo, task, root=ds_root,
+                                      log=log, token=token)
+            n, link, _mode = push_lerobot(target_repo, task, ds_root,
+                                          len(processed), token=token, log=log)
+        log(f"✅ Done — {n} episode(s).")
+        _rest_jobs[job_id].update(status="done", result=link or
+                                  f"https://huggingface.co/datasets/{target_repo}")
+        # Clean up the raw source dataset now that LeRobot dataset is ready.
+        try:
+            api.delete_repo(source_repo, repo_type="dataset")
+            log(f"Deleted raw dataset {source_repo}.")
+        except Exception as e:
+            log(f"Warning: could not delete raw dataset: {e}")
+    except Exception as e:
+        _rest_jobs[job_id].update(status="error", error=str(e))
+
+
+@demo.app.post("/api/process")
+async def api_process(req: _ProcessReq, authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <hf_token>")
+    token = authorization[len("Bearer "):].strip()
+    job_id = uuid.uuid4().hex[:12]
+    _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None}
+    t = threading.Thread(
+        target=_run_pipeline_headless,
+        args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
+              req.task.strip(), token),
+        daemon=True,
+    )
+    t.start()
+    return {"job_id": job_id}
+
+
+@demo.app.get("/api/status/{job_id}")
+async def api_status(job_id: str):
+    job = _rest_jobs.get(job_id)
+    if job is None:
+        return {"status": "not_found"}
+    return job
 
 
 if __name__ == "__main__":
