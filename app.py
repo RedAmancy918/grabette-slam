@@ -27,17 +27,17 @@ from views import CSS, THEME, bar
 with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     gr.HTML(
         "<div id='app-header'><h1>Grabette post-processing</h1>"
-        "<p>Raw OAK-D recording → SLAM → LeRobot dataset on the Hub</p></div>"
+        "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
     )
     with gr.Row():
         # ---- Inputs (left) ----
         with gr.Column(scale=2, min_width=280):
             gr.LoginButton(size="sm")
-            source = gr.Textbox(label="Source dataset", info="raw OAK-D repo on the Hub",
+            source = gr.Textbox(label="Source dataset", info="raw Grabette repo on the Hub",
                                 placeholder="pollen-robotics/grabette-raw")
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
-                                placeholder="your-account/grabette-demo")
-            task = gr.Textbox(label="Task description", placeholder="cup manipulation")
+                                placeholder="your-account/grabette-dataset")
+            task = gr.Textbox(label="Task description", placeholder="cup grasping")
             # Read-only recap of the inputs, shown in their place while running.
             selection_card = gr.HTML(visible=False)
             # Idle: only Run. Running: Run greyed to 'Running', + Pause + Cancel.
