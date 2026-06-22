@@ -1,6 +1,6 @@
 ---
-title: Grabette SLAM Pipeline
-emoji: 🤖
+title: Grabette Slam Test
+emoji: 🌍
 colorFrom: blue
 colorTo: indigo
 sdk: docker
