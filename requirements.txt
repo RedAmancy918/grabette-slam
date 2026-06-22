@@ -1,10 +1,11 @@
 # UI + Hub deps for the Space. The grabette-postprocess package (and its deps:
 # lerobot, numpy, opencv, pandas, ...) is installed from source in the Dockerfile.
 # gradio[oauth] pulls itsdangerous/authlib, required by gr.LoginButton (HF OAuth).
-# >=6.0: the app uses launch(theme=/css=) (moved there in 6.0) and the episode-
-# review panel uses @gr.render + gr.Timer + gr.skip().
+# @gr.render + gr.Timer + gr.skip() require >=6.0.
 gradio[oauth]>=6.0
 huggingface_hub>=0.20
+# uvicorn: used to serve the FastAPI app (with Gradio mounted via gr.mount_gradio_app).
+uvicorn[standard]>=0.34
 # `spaces` satisfies Gradio's in-Space hot-reload watcher (SYSTEM=spaces) so it
 # doesn't raise in a background thread.
 spaces

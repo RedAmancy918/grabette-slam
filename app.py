@@ -21,11 +21,12 @@ import uuid
 from pathlib import Path
 
 import gradio as gr
-from fastapi import Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from huggingface_hub import HfApi, snapshot_download
 from pydantic import BaseModel
 
 import review
+from views import CSS, THEME, bar
 from controller import (
     confirm_cancel,
     keep_running,
@@ -36,9 +37,13 @@ from controller import (
     run_pipeline_branch,
     toggle_pause,
 )
-from views import CSS, THEME, bar
 
-with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
+# ── Standalone FastAPI app — Gradio is mounted onto it so custom routes survive.
+# Registering routes on demo.app before launch() is unreliable in Gradio 6: the
+# internal FastAPI instance may be replaced, dropping the handlers.
+fastapi_app = FastAPI()
+
+with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_height=True) as demo:
     gr.HTML(
         "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
@@ -186,7 +191,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
         _rest_jobs[job_id].update(status="error", error=str(e))
 
 
-@demo.app.post("/api/process")
+@fastapi_app.post("/api/process")
 async def api_process(req: _ProcessReq, authorization: str | None = Header(default=None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <hf_token>")
@@ -203,7 +208,7 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
     return {"job_id": job_id}
 
 
-@demo.app.get("/api/status/{job_id}")
+@fastapi_app.get("/api/status/{job_id}")
 async def api_status(job_id: str):
     job = _rest_jobs.get(job_id)
     if job is None:
@@ -211,8 +216,10 @@ async def api_status(job_id: str):
     return job
 
 
+# Mount Gradio onto the FastAPI app. queue() is required for streaming generators
+# and for the Stop button's cancels=[] to take effect.
+app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/")
+
 if __name__ == "__main__":
-    # queue() is required for streaming generators and for the Stop button's
-    # cancels=[] to take effect. theme/css moved to launch() in Gradio 6.0.
-    demo.queue().launch(theme=THEME, css=CSS,
-                        server_name="0.0.0.0", server_port=7860)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
