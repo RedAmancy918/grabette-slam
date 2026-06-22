@@ -43,7 +43,7 @@ from controller import (
 # internal FastAPI instance may be replaced, dropping the handlers.
 fastapi_app = FastAPI()
 
-with gr.Blocks(title="Grabette SLAM → LeRobot", theme=THEME, css=CSS, fill_height=True) as demo:
+with gr.Blocks(title="Grabette SLAM → LeRobot", fill_height=True) as demo:
     gr.HTML(
         "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
@@ -218,7 +218,7 @@ async def api_status(job_id: str):
 
 # Mount Gradio onto the FastAPI app. queue() is required for streaming generators
 # and for the Stop button's cancels=[] to take effect.
-app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/")
+app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/", theme=THEME, css=CSS)
 
 if __name__ == "__main__":
     import uvicorn
