@@ -271,7 +271,6 @@ def episode_card(it: dict) -> str:
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
 
 CSS = """
-html, body {height: 100%; overflow: hidden;}
 .gradio-container {max-width: 1080px !important; margin: 0 auto !important;}
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}
