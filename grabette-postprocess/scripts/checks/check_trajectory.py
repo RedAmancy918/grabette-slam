@@ -10,13 +10,13 @@ reused by the HF Space pipeline; this file is just the CLI.
 
 Usage:
     # Check a single episode
-    uv run python scripts/checks/check_trajectory.py test_data/test_HF/episodes/20260331_095957
+    uv run python scripts/checks/check_trajectory.py -i test_data/test_HF/episodes/20260331_095957
 
     # Check all episodes in a dataset
-    uv run python scripts/checks/check_trajectory.py test_data/test_HF/episodes
+    uv run python scripts/checks/check_trajectory.py -i test_data/test_HF/episodes
 
     # Verbose output with per-frame details
-    uv run python scripts/checks/check_trajectory.py test_data/test_HF/episodes -v
+    uv run python scripts/checks/check_trajectory.py -i test_data/test_HF/episodes -v
 """
 
 from pathlib import Path
@@ -28,7 +28,8 @@ from grabette_postprocess.episode_manager import find_trajectory_episodes
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True))
+@click.option("-i", "--input_dir", "path", required=True,
+              type=click.Path(exists=True), help="Episode or dataset directory")
 @click.option("-v", "--verbose", is_flag=True, help="Show detailed per-episode diagnostics")
 @click.option("--jump_threshold", type=float, default=50.0,
               help="Jump detection threshold in mm (default: 50)")

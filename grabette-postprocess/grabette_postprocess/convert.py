@@ -18,8 +18,13 @@ Frame matching: left timestamps and depth timestamps share a seq number
 in seq order, and assign consecutive idx = 0..N-1. mp4 frames are decoded
 in encoding order (= seq order); we trim to whichever stream is shortest.
 
-Timestamps in the output CSVs are in nanoseconds in the SyncManager (host_ms)
-clock — same convention as my colleague's capture pipeline.
+Timestamps in the output CSVs are in nanoseconds. Camera frames keep their
+host_ms stamps — the clock the SLAM trajectory (and the downstream Arducam
+alignment in dataset.py) lives on. IMU samples are placed on that same host
+timeline via an affine fit of the OAK device clock → host clock (see
+fit_device_to_host_s): the IMU shares the cameras' device clock, so mapping it
+through the *frame* stream removes the ~tens-of-ms false camera-IMU offset that
+using the IMU stream's own (differently-buffered over USB) host_ms injects.
 """
 
 import json
@@ -28,9 +33,35 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 
 def _ms_to_ns(ms: float) -> int:
     return int(round(ms * 1e6))
+
+
+def fit_device_to_host_s(left_ts_samples: list) -> tuple[float, float] | None:
+    """Least-squares affine (slope, intercept) mapping the OAK device clock to
+    the host clock, both in seconds: ``host_s ≈ slope * device_s + intercept``.
+
+    Fitted on the OAK left frame stream (oakd_left_timestamps.json), which
+    carries both ``device_us`` and ``host_ms`` per frame. Used to place the IMU
+    — which shares the cameras' device clock — onto the frame host timeline
+    instead of trusting the IMU stream's own host_ms (whose USB-transfer latency
+    differs from the camera stream's by tens of ms). The same fit is reused by
+    the sync check so it validates exactly what the pipeline produces.
+
+    Returns None when device_us is absent (legacy recordings); callers then fall
+    back to raw host_ms.
+    """
+    pts = [(s["device_us"], s["host_ms"]) for s in left_ts_samples
+           if "device_us" in s and s.get("host_ms") is not None]
+    if len(pts) < 2:
+        return None
+    dev_s = np.array([p[0] for p in pts], dtype=float) * 1e-6
+    host_s = np.array([p[1] for p in pts], dtype=float) * 1e-3
+    slope, intercept = np.polyfit(dev_s, host_s, 1)
+    return float(slope), float(intercept)
 
 
 def _extract_mp4_frames(mp4_path: Path, out_dir: Path) -> int:
@@ -64,13 +95,18 @@ def _extract_depth_video(mkv_path: Path, out_dir: Path) -> int:
     return len(list(out_dir.glob("*.png")))
 
 
-def _split_imu_to_csvs(imu_json: Path, oak_dir: Path) -> tuple[int, int, int]:
+def _split_imu_to_csvs(imu_json: Path, oak_dir: Path,
+                       dev_to_host_s: tuple[float, float] | None = None) -> tuple[int, int, int]:
     """Split oakd_imu.json into the three CSVs offline_vslam reads
     (imu_acc.csv, imu_gyro.csv, imu_rotation.csv). Returns (n_accel, n_gyro, n_rot).
 
     rotation is the BNO086's fused orientation (IMU body → gravity-aligned world).
     RTAB-Map's Odometry can take this as orientation per IMU sample and use it for
     VIO initialization + drift constraint during rotations.
+
+    When `dev_to_host_s` (slope, intercept) is given, each sample's device_us is
+    mapped onto the frame host timeline so the IMU is correctly synced to the
+    cameras; otherwise (or when a sample lacks device_us) the raw host_ms is used.
     """
     imu = json.loads(imu_json.read_text())["samples"]
     n_acc = n_gyr = n_rot = 0
@@ -83,7 +119,11 @@ def _split_imu_to_csvs(imu_json: Path, oak_dir: Path) -> tuple[int, int, int]:
         for s in imu:
             kind = s.get("kind")
             v = s.get("value")
-            ts_ns = _ms_to_ns(float(s["host_ms"]))
+            if dev_to_host_s is not None and "device_us" in s:
+                slope, intercept = dev_to_host_s
+                ts_ns = _ms_to_ns((slope * s["device_us"] * 1e-6 + intercept) * 1e3)
+            else:
+                ts_ns = _ms_to_ns(float(s["host_ms"]))
             if kind == "accel" and v and len(v) >= 3:
                 f_a.write(f"{ts_ns},{v[0]},{v[1]},{v[2]}\n")
                 n_acc += 1
@@ -133,6 +173,9 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
     # --- Build (seq, host_ms) pairs that exist in BOTH left and depth ---
     left_ts = json.loads(left_ts_json.read_text())["samples"]
     depth_ts = json.loads(depth_ts_json.read_text())["samples"]
+    # device→host fit from the frame stream: lets the IMU below ride the same
+    # host timeline as the frames (removes the false camera-IMU offset).
+    dev_to_host_s = fit_device_to_host_s(left_ts)
     depth_seqs = {int(d["seq"]): d for d in depth_ts}
     matched = [
         (int(l["seq"]), float(l["host_ms"]))
@@ -189,7 +232,9 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
                 f.write(f"{idx},{_ms_to_ns(host_ms)}\n")
 
     # --- Split IMU JSON → imu_acc.csv + imu_gyro.csv + imu_rotation.csv ---
-    n_acc, n_gyr, n_rot = _split_imu_to_csvs(imu_json, oak_dir)
+    n_acc, n_gyr, n_rot = _split_imu_to_csvs(imu_json, oak_dir, dev_to_host_s)
 
-    print(f"  oak/ written: {n} frames, {n_acc} accel, {n_gyr} gyro, {n_rot} rotation samples")
+    clk = "device→host fit" if dev_to_host_s is not None else "raw host_ms (no device_us)"
+    print(f"  oak/ written: {n} frames, {n_acc} accel, {n_gyr} gyro, "
+          f"{n_rot} rotation samples (IMU clock: {clk})")
     return oak_dir
