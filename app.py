@@ -151,12 +151,23 @@ class _ProcessReq(BaseModel):
     source_repo: str
     target_repo: str
     task: str
+    exclude_fail: bool = False
+    exclude_bad: bool = False
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
-                            task: str, token: str) -> None:
-    """Run the pipeline synchronously in a background thread (no review gates)."""
+                            task: str, token: str,
+                            exclude_fail: bool = False,
+                            exclude_bad: bool = False) -> None:
+    """Run the pipeline synchronously in a background thread.
+
+    exclude_fail: drop episodes with trajectory verdict FAIL before building.
+    exclude_bad:  drop episodes with verdict BAD or FAIL before building.
+    All episodes appear in the returned quality data (including SLAM failures and
+    excluded ones) so the caller can display a full recap.
+    """
     logs: list[str] = []
+    quality_episodes: list[dict] = []
 
     def log(msg: str) -> None:
         logs.append(msg)
@@ -172,16 +183,78 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                                 max_workers=48)
         log("Download complete. Running SLAM + LeRobot conversion…")
         ds_root = work / "lerobot"
+
         with contextlib.redirect_stdout(type("W", (), {"write": lambda s, m: log(m.rstrip()) or None, "flush": lambda s: None})()): # noqa: E501
-            from pipeline import build_lerobot, push_lerobot
-            processed = build_lerobot(raw, target_repo, task, root=ds_root,
-                                      log=log, token=token)
+            from pipeline import find_episode_dirs, precheck_episodes, run_slam, push_lerobot
+            from grabette_postprocess.dataset import build_dataset
+
+            episodes = find_episode_dirs(Path(raw))
+            if not episodes:
+                raise ValueError(f"No episodes found under {raw}")
+            log(f"Found {len(episodes)} episode(s).")
+
+            # Completeness + sync checks — informational; headless keeps all episodes.
+            checks = precheck_episodes(episodes, log=log)
+            slam_input = [c["ep"] for c in checks]
+
+            # SLAM: convert + trajectory per episode.
+            slam_results = run_slam(slam_input, log=log)
+            slam_succeeded = {ep for ep, _ in slam_results}
+
+            # Record complete SLAM failures (no trajectory produced at all).
+            for ep in slam_input:
+                if ep not in slam_succeeded:
+                    quality_episodes.append({
+                        "name": ep.name,
+                        "verdict": "FAIL",
+                        "tracking_pct": 0.0,
+                        "n_jumps": 0,
+                        "total_distance_m": 0.0,
+                        "errors": ["SLAM failed: no trajectory produced"],
+                        "warnings": [],
+                        "excluded": True,
+                    })
+
+            # Apply verdict filter and record trajectory quality.
+            kept = []
+            for ep, report in slam_results:
+                excluded = (
+                    (exclude_fail and report.verdict == "FAIL")
+                    or (exclude_bad and report.verdict in ("BAD", "FAIL"))
+                )
+                if excluded:
+                    log(f"  • Excluded ({report.verdict}): {ep.name}")
+                else:
+                    kept.append(ep)
+                quality_episodes.append({
+                    "name": ep.name,
+                    "verdict": report.verdict,
+                    "tracking_pct": round(report.tracking_pct, 1),
+                    "n_jumps": report.n_jumps,
+                    "total_distance_m": round(report.total_distance_m, 2),
+                    "errors": list(report.errors),
+                    "warnings": list(report.warnings),
+                    "excluded": excluded,
+                })
+
+            if not kept:
+                raise RuntimeError(
+                    "No episode produced an acceptable trajectory; nothing to push."
+                )
+
+            log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
+            build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
+                          root=ds_root)
             n, link, _mode = push_lerobot(target_repo, task, ds_root,
-                                          len(processed), token=token, log=log)
+                                          len(kept), token=token, log=log)
+
         log(f"✅ Done — {n} episode(s).")
-        _rest_jobs[job_id].update(status="done", result=link or
-                                  f"https://huggingface.co/datasets/{target_repo}")
-        # Clean up the raw source dataset now that LeRobot dataset is ready.
+        _rest_jobs[job_id].update(
+            status="done",
+            result=link or f"https://huggingface.co/datasets/{target_repo}",
+            quality=quality_episodes,
+        )
+        # Clean up the raw source dataset now that the LeRobot dataset is ready.
         try:
             api.delete_repo(source_repo, repo_type="dataset")
             log(f"Deleted raw dataset {source_repo}.")
@@ -197,11 +270,12 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <hf_token>")
     token = authorization[len("Bearer "):].strip()
     job_id = uuid.uuid4().hex[:12]
-    _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None}
+    _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None, "quality": None}
     t = threading.Thread(
         target=_run_pipeline_headless,
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
+        kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad},
         daemon=True,
     )
     t.start()
