@@ -15,7 +15,7 @@ from grabette_postprocess.dataset import build_dataset
 from grabette_postprocess.episode_manager import find_episodes
 from grabette_postprocess.checks.trajectory import check_trajectory
 from grabette_postprocess.checks.recording import check_recording
-from grabette_postprocess.checks.sync import check_oak_imu
+from grabette_postprocess.checks.sync import check_oak_imu, check_image_trajectory
 
 BINARY = os.environ.get("OAK_VSLAM_BINARY", "/usr/local/bin/offline_vslam")
 
@@ -175,6 +175,23 @@ def _slam_episode(ep: Path):
     )
     for msg in (*report.errors, *report.warnings):
         lines.append(f"      • {msg}")
+
+    # Image↔pose temporal alignment (POST-SLAM): correlate the Arducam optical
+    # flow against the trajectory's angular velocity — the end-to-end image↔pose
+    # offset the policy trains on. Complements the pre-SLAM OAK-cam↔gyro gate
+    # (_check_sync), which only validates the SLAM inputs. Informational (never
+    # drops); a sync failure must never abort the run.
+    try:
+        sync = check_image_trajectory(ep)
+    except Exception as e:
+        sync = None
+        lines.append(f"  ⚠️ {ep.name}: image↔trajectory check failed: {e}")
+    if sync is not None:
+        msg = f"image↔trajectory lag {sync['lag'] * 1000:+.0f} ms (corr {sync['corr']:.2f})"
+        if sync["note"]:
+            msg += f" — {sync['note']}"
+        lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {msg}")
+
     return (ep, report), lines
 
 
