@@ -193,26 +193,45 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 raise ValueError(f"No episodes found under {raw}")
             log(f"Found {len(episodes)} episode(s).")
 
-            # Completeness + sync checks — informational; headless keeps all episodes.
+            # Pre-check: auto-exclude episodes with recording errors and record them
+            # in quality_episodes so the caller can display a full recap.
             checks = precheck_episodes(episodes, log=log)
-            slam_input = [c["ep"] for c in checks]
+            for c in checks:
+                sync_bad = c.get("sync") is not None and c["sync"]["verdict"] != "GOOD"
+                if c["errors"]:
+                    quality_episodes.append({
+                        "name": c["name"], "kind": "pre_check", "verdict": "ERROR",
+                        "errors": list(c["errors"]),
+                        "warnings": list(c["warnings"]) + (
+                            [c["sync"]["message"]] if sync_bad else []
+                        ),
+                        "excluded": True,
+                    })
+                elif c["warnings"] or sync_bad:
+                    quality_episodes.append({
+                        "name": c["name"], "kind": "pre_check", "verdict": "WARN",
+                        "errors": [],
+                        "warnings": list(c["warnings"]) + (
+                            [c["sync"]["message"]] if sync_bad else []
+                        ),
+                        "excluded": False,
+                    })
+            slam_input = [c["ep"] for c in checks if not c["errors"]]
+            if not slam_input:
+                raise RuntimeError("All episodes failed the recording check; nothing to process.")
 
             # SLAM: convert + trajectory per episode.
             slam_results = run_slam(slam_input, log=log)
             slam_succeeded = {ep for ep, _ in slam_results}
 
-            # Record complete SLAM failures (no trajectory produced at all).
+            # Record SLAM failures (no trajectory produced at all).
             for ep in slam_input:
                 if ep not in slam_succeeded:
                     quality_episodes.append({
-                        "name": ep.name,
-                        "verdict": "FAIL",
-                        "tracking_pct": 0.0,
-                        "n_jumps": 0,
-                        "total_distance_m": 0.0,
+                        "name": ep.name, "kind": "slam", "verdict": "FAIL",
+                        "tracking_pct": 0.0, "n_jumps": 0, "total_distance_m": 0.0,
                         "errors": ["SLAM failed: no trajectory produced"],
-                        "warnings": [],
-                        "excluded": True,
+                        "warnings": [], "excluded": True,
                     })
 
             # Apply verdict filter and record trajectory quality.
@@ -227,7 +246,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 else:
                     kept.append(ep)
                 quality_episodes.append({
-                    "name": ep.name,
+                    "name": ep.name, "kind": "trajectory",
                     "verdict": report.verdict,
                     "tracking_pct": round(report.tracking_pct, 1),
                     "n_jumps": report.n_jumps,
