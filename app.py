@@ -153,16 +153,19 @@ class _ProcessReq(BaseModel):
     task: str
     exclude_fail: bool = False
     exclude_bad: bool = False
+    private: bool = False
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             task: str, token: str,
                             exclude_fail: bool = False,
-                            exclude_bad: bool = False) -> None:
+                            exclude_bad: bool = False,
+                            private: bool = False) -> None:
     """Run the pipeline synchronously in a background thread.
 
     exclude_fail: drop episodes with trajectory verdict FAIL before building.
     exclude_bad:  drop episodes with verdict BAD or FAIL before building.
+    private: create the LeRobot dataset repo as private.
     All episodes appear in the returned quality data (including SLAM failures and
     excluded ones) so the caller can display a full recap.
     """
@@ -265,7 +268,8 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
             build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
                           root=ds_root)
             n, link, _mode = push_lerobot(target_repo, task, ds_root,
-                                          len(kept), token=token, log=log)
+                                          len(kept), token=token, log=log,
+                                          private=private)
 
         log(f"✅ Done — {n} episode(s).")
         _rest_jobs[job_id].update(
@@ -294,7 +298,8 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         target=_run_pipeline_headless,
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
-        kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad},
+        kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
+                "private": req.private},
         daemon=True,
     )
     t.start()

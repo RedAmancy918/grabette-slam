@@ -328,7 +328,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
 
 def push_lerobot(target_repo, task, root, n_episodes, to_branch=False,
                  token=None, log=print, on_progress=None,
-                 gate=None) -> tuple[int, str | None, str]:
+                 gate=None, private=False) -> tuple[int, str | None, str]:
     """Push an already-built LeRobot dataset (on disk under `root`) to the Hub.
 
     Separated from the build so a failed push can be retried without re-running
@@ -368,7 +368,7 @@ def push_lerobot(target_repo, task, root, n_episodes, to_branch=False,
 
     log(f"Pushing to https://huggingface.co/datasets/{target_repo} …")
     try:
-        ds.push_to_hub(tags=["lerobot", "grabette"])
+        ds.push_to_hub(tags=["lerobot", "grabette"], private=private)
     except Exception as e:
         # This path creates the repo (target didn't exist at pre-flight). A 401/403
         # here means the sign-in token lacks the 'manage-repos' scope creation needs
