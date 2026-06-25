@@ -15,9 +15,22 @@ from grabette_postprocess.dataset import build_dataset
 from grabette_postprocess.episode_manager import find_episodes
 from grabette_postprocess.checks.trajectory import check_trajectory
 from grabette_postprocess.checks.recording import check_recording
-from grabette_postprocess.checks.sync import check_sync
+from grabette_postprocess.checks.sync import check_oak_imu
 
 BINARY = os.environ.get("OAK_VSLAM_BINARY", "/usr/local/bin/offline_vslam")
+
+
+def _check_sync(episode_dir):
+    """Thin adapter: run check_oak_imu and normalise to {verdict, message}."""
+    result = check_oak_imu(episode_dir)
+    if result is None:
+        return None
+    lag_ms = abs(result["lag"]) * 1000
+    note = result.get("note", "")
+    msg = f"OAK cam↔gyro lag {lag_ms:.1f} ms"
+    if note:
+        msg += f" — {note}"
+    return {"verdict": result["verdict"], "message": msg}
 
 
 def find_episode_dirs(root: Path) -> list[Path]:
@@ -115,7 +128,7 @@ def _precheck_episode(ep: Path):
 
     sync = None
     try:
-        sync = check_sync(ep)
+        sync = _check_sync(ep)
     except Exception as e:  # a sync failure must never abort the whole run
         lines.append(f"  ⚠️ {ep.name}: sync check failed: {e}")
     if sync is not None:
