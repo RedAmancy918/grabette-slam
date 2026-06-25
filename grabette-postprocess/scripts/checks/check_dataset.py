@@ -14,7 +14,7 @@ grabette_postprocess.checks.recording so it can be reused by the HF Space
 pipeline; this file is just the CLI.
 
 Usage:
-    uv run python scripts/checks/check_dataset.py ~/data/dataset
+    uv run python scripts/checks/check_dataset.py -i ~/data/dataset
 """
 
 from pathlib import Path
@@ -26,7 +26,8 @@ from grabette_postprocess.episode_manager import find_episodes
 
 
 @click.command()
-@click.argument("dataset_dir", type=click.Path(exists=True))
+@click.option("-i", "--input_dir", "dataset_dir", required=True,
+              type=click.Path(exists=True), help="Dataset directory to check")
 @click.option("-v", "--verbose", is_flag=True, help="Show per-episode info lines too")
 def main(dataset_dir, verbose):
     """Check dataset health: Arducam video, OAK RGBD/IMU, gripper angles, SLAM outputs."""

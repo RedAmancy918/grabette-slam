@@ -20,6 +20,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from grabette_postprocess.convert import fit_device_to_host_s
+
 # Lag thresholds (seconds): below GOOD is fine, between is marginal, above breaks
 # visual-inertial SLAM and the camera↔pose alignment.
 _GOOD_LAG_S = 0.020
@@ -94,23 +96,51 @@ def compute_optical_flow_magnitude(
 def load_oak_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Load the OAK gyroscope and return (timestamps_s, angular_velocity_norm).
 
-    Reads oakd_imu.json (flat schema, kind == "gyro"). Timestamps use the host_ms
-    clock (seconds), matching the camera frame timestamps.
+    Reads oakd_imu.json (flat schema, kind == "gyro"). Timestamps use the OAK
+    device clock (device_us), which the cameras and IMU share on the OAK
+    hardware, so the camera↔gyro comparison reflects true capture timing rather
+    than USB-arrival (host_ms) jitter. Falls back to host_ms for legacy
+    recordings without device_us.
     """
     gyro = [s for s in _samples(imu_path) if s.get("kind") == "gyro"]
     if not gyro:
         raise ValueError(f"No gyro samples in {imu_path}")
-    ts = np.array([s["host_ms"] for s in gyro]) * 1e-3
+    if all("device_us" in s for s in gyro):
+        ts = np.array([s["device_us"] for s in gyro], dtype=float) * 1e-6
+    else:
+        ts = np.array([s["host_ms"] for s in gyro], dtype=float) * 1e-3
     norms = np.linalg.norm([s["value"] for s in gyro], axis=1)
     return ts, norms
 
 
 def oak_left_frame_ts(episode_dir: Path) -> np.ndarray | None:
-    """Per-frame host_ms timestamps (seconds) for oakd_left.mp4, or None."""
+    """Per-frame device_us timestamps (seconds) for oakd_left.mp4 — the OAK
+    hardware clock, matching the gyro from load_oak_gyro_norm. Falls back to
+    host_ms when device_us is absent. None when the file is missing."""
     ts_path = episode_dir / "oakd_left_timestamps.json"
     if not ts_path.is_file():
         return None
-    return np.array([s["host_ms"] for s in _samples(ts_path)]) * 1e-3
+    samples = _samples(ts_path)
+    if all("device_us" in s for s in samples):
+        return np.array([s["device_us"] for s in samples], dtype=float) * 1e-6
+    return np.array([s["host_ms"] for s in samples], dtype=float) * 1e-3
+
+
+def gyro_on_host_timeline(device_ts_s: np.ndarray, episode_dir: Path) -> np.ndarray:
+    """Map gyro device-clock timestamps onto the OAK *frame* host timeline — the
+    clock the SLAM trajectory and the Arducam alignment live on — using the
+    affine fit from oakd_left_timestamps.json (the same fit convert.py applies to
+    the IMU). Needed for the cross-device Arducam↔gyro comparison, since the
+    Arducam only carries host timestamps. Returns the input unchanged when no
+    device↔host fit is available (legacy: ts are already host_ms)."""
+    ts_path = episode_dir / "oakd_left_timestamps.json"
+    if not ts_path.is_file():
+        return device_ts_s
+    fit = fit_device_to_host_s(_samples(ts_path))
+    if fit is None:
+        return device_ts_s
+    slope, intercept = fit
+    return slope * device_ts_s + intercept
 
 
 def arducam_frame_ts(episode_dir: Path) -> np.ndarray | None:
@@ -214,7 +244,10 @@ def check_sync(ep_dir: Path, max_frames: int = 500) -> dict | None:
     if len(flow_mag) < 2:
         return None
 
-    best_lag, best_corr, _, _ = cross_correlate_signals(flow_ts, flow_mag, gyro_ts, gyro_norm)
+    # Arducam carries only host timestamps, so bring the device-clock gyro onto
+    # the OAK frame host timeline (the trajectory's clock) before correlating.
+    gyro_host_ts = gyro_on_host_timeline(gyro_ts, ep_dir)
+    best_lag, best_corr, _, _ = cross_correlate_signals(flow_ts, flow_mag, gyro_host_ts, gyro_norm)
     verdict, note = classify_lag(best_lag, best_corr)
     approx = frame_ts is None
     message = (f"arducam↔gyro lag {best_lag * 1000:+.0f} ms (corr {best_corr:.2f})"

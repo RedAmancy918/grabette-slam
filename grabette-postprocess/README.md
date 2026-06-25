@@ -60,7 +60,7 @@ uv run python scripts/pipeline/convert_episode_to_oak.py -i ~/data/dataset/episo
 uv run python scripts/pipeline/run_oak_slam.py -i ~/data/dataset/episode
 
 # 3. Validate trajectories
-uv run python scripts/checks/check_trajectory.py ~/data/dataset
+uv run python scripts/checks/check_trajectory.py -i ~/data/dataset
 
 # 4. Generate LeRobot dataset
 uv run python scripts/pipeline/generate_dataset.py \
@@ -70,7 +70,7 @@ uv run python scripts/pipeline/generate_dataset.py \
   --root ~/lerobot_datasets
 
 # 5. Visualize a trajectory
-uv run python scripts/visualize/visualize_rgbd_trajectory.py ~/data/dataset/episode
+uv run python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
 
 # 6. Push to HuggingFace Hub
 uv run python scripts/pipeline/push_to_hub.py \
@@ -97,13 +97,13 @@ frame-to-frame deltas into absolute poses, gravity-aligns the trajectory
 
 ```bash
 # Dataset health: IMU sample counts, video metadata, flag obvious problems
-uv run python scripts/checks/check_dataset.py ~/data/dataset
+uv run python scripts/checks/check_dataset.py -i ~/data/dataset
 
 # Camera-IMU synchronization (optical flow vs gyro). <20ms good, >50ms bad
-uv run python scripts/checks/check_sync.py ~/data/dataset/episode --plot sync.png
+uv run python scripts/checks/check_sync.py -i ~/data/dataset/episode --plot sync.png
 
 # Trajectory quality: drift, relocalization jumps, zigzagging, unrealistic motion
-uv run python scripts/checks/check_trajectory.py ~/data/dataset -v
+uv run python scripts/checks/check_trajectory.py -i ~/data/dataset -v
 ```
 
 ### 3. Generate LeRobot dataset
@@ -145,7 +145,7 @@ Interactive 3D visualization with [Rerun](https://rerun.io/): the SLAM
 trajectory, the OAK-left camera feed, and IMU time series.
 
 ```bash
-uv run python scripts/visualize/visualize_rgbd_trajectory.py ~/data/dataset/episode
+uv run python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
 ```
 
 ## Project structure
@@ -154,12 +154,15 @@ uv run python scripts/visualize/visualize_rgbd_trajectory.py ~/data/dataset/epis
 grabette-postprocess/
 ├── pyproject.toml
 ├── grabette_postprocess/
-│   ├── trajectory.py    # CSV parsing, quaternion→axis-angle, ANGL interpolation
-│   ├── oak_slam.py      # OAK-D RTAB-Map orchestration (delta integration + gravity align)
-│   └── dataset.py       # LeRobot v3 dataset builder
+│   ├── trajectory.py       # CSV parsing, quaternion→axis-angle, ANGL interpolation
+│   ├── convert.py          # recording → oak/ layout expansion
+│   ├── oak_slam.py         # OAK-D RTAB-Map orchestration (delta integration + gravity align)
+│   ├── dataset.py          # LeRobot v3 dataset builder
+│   ├── episode_manager.py  # episode discovery / dropping
+│   └── checks/             # validation logic (recording, sync, trajectory)
 ├── docker/
 │   └── oak_vslam/       # RTAB-Map offline_vslam C++ + Dockerfile
-└── scripts/                           # local CLIs (mirror the HF Space pipeline)
+└── scripts/                           # local CLIs (mirror the post-processing pipeline)
     ├── pipeline/                       # the pipeline stages, in order
     │   ├── convert_episode_to_oak.py   # recording → oak/ layout
     │   ├── run_oak_slam.py             # offline OAK-D VSLAM → camera_trajectory.csv
