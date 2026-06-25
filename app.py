@@ -176,6 +176,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
         logs.append(msg)
         _rest_jobs[job_id]["log"] = "\n".join(logs)
 
+    result_link: str | None = None
     try:
         os.environ["HF_TOKEN"] = token
         api = HfApi(token=token)
@@ -221,70 +222,70 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                     })
             slam_input = [c["ep"] for c in checks if not c["errors"]]
             if not slam_input:
-                raise RuntimeError("All episodes failed the recording check; nothing to process.")
+                log("⚠ All episodes failed the recording check — nothing to process.")
+            else:
+                # SLAM: convert + trajectory per episode.
+                slam_results = run_slam(slam_input, log=log)
+                slam_succeeded = {ep for ep, _ in slam_results}
 
-            # SLAM: convert + trajectory per episode.
-            slam_results = run_slam(slam_input, log=log)
-            slam_succeeded = {ep for ep, _ in slam_results}
+                # Record SLAM failures (no trajectory produced at all).
+                for ep in slam_input:
+                    if ep not in slam_succeeded:
+                        quality_episodes.append({
+                            "name": ep.name, "kind": "slam", "verdict": "FAIL",
+                            "tracking_pct": 0.0, "n_jumps": 0, "total_distance_m": 0.0,
+                            "errors": ["SLAM failed: no trajectory produced"],
+                            "warnings": [], "excluded": True,
+                        })
 
-            # Record SLAM failures (no trajectory produced at all).
-            for ep in slam_input:
-                if ep not in slam_succeeded:
+                # Apply verdict filter and record trajectory quality.
+                kept = []
+                for ep, report in slam_results:
+                    excluded = (
+                        (exclude_fail and report.verdict == "FAIL")
+                        or (exclude_bad and report.verdict in ("BAD", "WARN", "FAIL"))
+                    )
+                    if excluded:
+                        log(f"  • Excluded ({report.verdict}): {ep.name}")
+                    else:
+                        kept.append(ep)
                     quality_episodes.append({
-                        "name": ep.name, "kind": "slam", "verdict": "FAIL",
-                        "tracking_pct": 0.0, "n_jumps": 0, "total_distance_m": 0.0,
-                        "errors": ["SLAM failed: no trajectory produced"],
-                        "warnings": [], "excluded": True,
+                        "name": ep.name, "kind": "trajectory",
+                        "verdict": report.verdict,
+                        "tracking_pct": round(report.tracking_pct, 1),
+                        "n_jumps": report.n_jumps,
+                        "total_distance_m": round(report.total_distance_m, 2),
+                        "errors": list(report.errors),
+                        "warnings": list(report.warnings),
+                        "excluded": excluded,
                     })
 
-            # Apply verdict filter and record trajectory quality.
-            kept = []
-            for ep, report in slam_results:
-                excluded = (
-                    (exclude_fail and report.verdict == "FAIL")
-                    or (exclude_bad and report.verdict in ("BAD", "WARN", "FAIL"))
-                )
-                if excluded:
-                    log(f"  • Excluded ({report.verdict}): {ep.name}")
+                if not kept:
+                    log("⚠ No episode produced an acceptable trajectory — dataset not pushed.")
                 else:
-                    kept.append(ep)
-                quality_episodes.append({
-                    "name": ep.name, "kind": "trajectory",
-                    "verdict": report.verdict,
-                    "tracking_pct": round(report.tracking_pct, 1),
-                    "n_jumps": report.n_jumps,
-                    "total_distance_m": round(report.total_distance_m, 2),
-                    "errors": list(report.errors),
-                    "warnings": list(report.warnings),
-                    "excluded": excluded,
-                })
+                    log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
+                    build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
+                                  root=ds_root)
+                    n, link, _mode = push_lerobot(target_repo, task, ds_root,
+                                                  len(kept), token=token, log=log,
+                                                  private=private)
+                    result_link = link or f"https://huggingface.co/datasets/{target_repo}"
+                    log(f"✅ Done — {n} episode(s).")
 
-            if not kept:
-                raise RuntimeError(
-                    "No episode produced an acceptable trajectory; nothing to push."
-                )
-
-            log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
-            build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
-                          root=ds_root)
-            n, link, _mode = push_lerobot(target_repo, task, ds_root,
-                                          len(kept), token=token, log=log,
-                                          private=private)
-
-        log(f"✅ Done — {n} episode(s).")
         _rest_jobs[job_id].update(
             status="done",
-            result=link or f"https://huggingface.co/datasets/{target_repo}",
+            result=result_link,
             quality=quality_episodes,
         )
-        # Clean up the raw source dataset now that the LeRobot dataset is ready.
+    except Exception as e:
+        _rest_jobs[job_id].update(status="error", error=str(e), quality=quality_episodes)
+    finally:
+        # Always clean up the raw source dataset regardless of outcome.
         try:
             api.delete_repo(source_repo, repo_type="dataset")
             log(f"Deleted raw dataset {source_repo}.")
         except Exception as e:
             log(f"Warning: could not delete raw dataset: {e}")
-    except Exception as e:
-        _rest_jobs[job_id].update(status="error", error=str(e))
 
 
 @fastapi_app.post("/api/process")
