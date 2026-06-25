@@ -220,7 +220,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
             for ep, report in slam_results:
                 excluded = (
                     (exclude_fail and report.verdict == "FAIL")
-                    or (exclude_bad and report.verdict in ("BAD", "FAIL"))
+                    or (exclude_bad and report.verdict in ("BAD", "WARN", "FAIL"))
                 )
                 if excluded:
                     log(f"  • Excluded ({report.verdict}): {ep.name}")
