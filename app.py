@@ -153,6 +153,12 @@ class _ProcessReq(BaseModel):
     task: str
     exclude_fail: bool = False
     exclude_bad: bool = False
+    exclude_warn: bool = False
+    exclude_bad_speed: bool = False
+    exclude_bad_drift: bool = False
+    exclude_bad_zigzag: bool = False
+    exclude_warn_jumps: bool = False
+    exclude_warn_tracking: bool = False
     exclude_recording_warn: bool = False
     exclude_sync_bad: bool = False
     exclude_sync_marginal: bool = False
@@ -163,17 +169,29 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             task: str, token: str,
                             exclude_fail: bool = False,
                             exclude_bad: bool = False,
+                            exclude_warn: bool = False,
+                            exclude_bad_speed: bool = False,
+                            exclude_bad_drift: bool = False,
+                            exclude_bad_zigzag: bool = False,
+                            exclude_warn_jumps: bool = False,
+                            exclude_warn_tracking: bool = False,
                             exclude_recording_warn: bool = False,
                             exclude_sync_bad: bool = False,
                             exclude_sync_marginal: bool = False,
                             private: bool = False) -> None:
     """Run the pipeline synchronously in a background thread.
 
-    exclude_fail:            drop episodes with trajectory verdict FAIL.
-    exclude_bad:             drop episodes with trajectory verdict BAD, WARN, or FAIL.
-    exclude_recording_warn:  drop episodes flagged with recording warnings.
-    exclude_sync_bad:        drop episodes with BAD OAK-cam ↔ IMU sync.
-    exclude_sync_marginal:   drop episodes with MARGINAL or BAD sync.
+    exclude_fail:          drop episodes with trajectory verdict FAIL.
+    exclude_bad:           drop all BAD episodes.
+    exclude_warn:          drop all WARN episodes.
+    exclude_bad_speed:     drop BAD if avg speed > 2 m/s.
+    exclude_bad_drift:     drop BAD if IMU drift pattern (step > 15 mm, angle < 5°).
+    exclude_bad_zigzag:    drop BAD if zigzag (> 5 jumps, angle > 90°).
+    exclude_warn_jumps:    drop WARN if excessive jumps (> 10 % of tracked frames).
+    exclude_warn_tracking: drop WARN if low tracking (< 50 %).
+    exclude_recording_warn: drop episodes flagged with recording warnings.
+    exclude_sync_bad:      drop episodes with BAD OAK-cam ↔ IMU sync.
+    exclude_sync_marginal: drop episodes with MARGINAL or BAD sync.
     private: create the LeRobot dataset repo as private.
     All episodes appear in the returned quality data (including excluded ones)
     so the caller can display a full recap.
@@ -264,9 +282,27 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 # Apply verdict filter and record trajectory quality.
                 kept = []
                 for ep, report in slam_results:
+                    avg_speed = (report.total_distance_m / max(report.duration_s, 0.1)
+                                 if report.n_tracked >= 2 else 0.0)
+                    has_bad_speed    = avg_speed > 2.0
+                    has_bad_drift    = report.median_step_mm > 15 and report.median_angle_deg < 5
+                    has_bad_zigzag   = report.n_jumps > 5 and report.median_angle_deg > 90
+                    has_warn_jumps   = (report.n_jumps > report.n_tracked * 0.1
+                                        if report.n_tracked > 0 else False)
+                    has_warn_tracking = report.tracking_pct < 50
                     excluded = (
                         (exclude_fail and report.verdict == "FAIL")
-                        or (exclude_bad and report.verdict in ("BAD", "WARN", "FAIL"))
+                        or (exclude_bad and report.verdict == "BAD")
+                        or (exclude_warn and report.verdict == "WARN")
+                        or (report.verdict == "BAD" and (
+                            (exclude_bad_speed  and has_bad_speed)
+                            or (exclude_bad_drift  and has_bad_drift)
+                            or (exclude_bad_zigzag and has_bad_zigzag)
+                        ))
+                        or (report.verdict == "WARN" and (
+                            (exclude_warn_jumps    and has_warn_jumps)
+                            or (exclude_warn_tracking and has_warn_tracking)
+                        ))
                     )
                     if excluded:
                         log(f"  • Excluded ({report.verdict}): {ep.name}")
@@ -323,6 +359,12 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
+                "exclude_warn": req.exclude_warn,
+                "exclude_bad_speed": req.exclude_bad_speed,
+                "exclude_bad_drift": req.exclude_bad_drift,
+                "exclude_bad_zigzag": req.exclude_bad_zigzag,
+                "exclude_warn_jumps": req.exclude_warn_jumps,
+                "exclude_warn_tracking": req.exclude_warn_tracking,
                 "exclude_recording_warn": req.exclude_recording_warn,
                 "exclude_sync_bad": req.exclude_sync_bad,
                 "exclude_sync_marginal": req.exclude_sync_marginal,
