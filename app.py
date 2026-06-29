@@ -153,6 +153,9 @@ class _ProcessReq(BaseModel):
     task: str
     exclude_fail: bool = False
     exclude_bad: bool = False
+    exclude_recording_warn: bool = False
+    exclude_sync_bad: bool = False
+    exclude_sync_marginal: bool = False
     private: bool = False
 
 
@@ -160,14 +163,20 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             task: str, token: str,
                             exclude_fail: bool = False,
                             exclude_bad: bool = False,
+                            exclude_recording_warn: bool = False,
+                            exclude_sync_bad: bool = False,
+                            exclude_sync_marginal: bool = False,
                             private: bool = False) -> None:
     """Run the pipeline synchronously in a background thread.
 
-    exclude_fail: drop episodes with trajectory verdict FAIL before building.
-    exclude_bad:  drop episodes with verdict BAD or FAIL before building.
+    exclude_fail:            drop episodes with trajectory verdict FAIL.
+    exclude_bad:             drop episodes with trajectory verdict BAD, WARN, or FAIL.
+    exclude_recording_warn:  drop episodes flagged with recording warnings.
+    exclude_sync_bad:        drop episodes with BAD OAK-cam ↔ IMU sync.
+    exclude_sync_marginal:   drop episodes with MARGINAL or BAD sync.
     private: create the LeRobot dataset repo as private.
-    All episodes appear in the returned quality data (including SLAM failures and
-    excluded ones) so the caller can display a full recap.
+    All episodes appear in the returned quality data (including excluded ones)
+    so the caller can display a full recap.
     """
     logs: list[str] = []
     quality_episodes: list[dict] = []
@@ -197,30 +206,44 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 raise ValueError(f"No episodes found under {raw}")
             log(f"Found {len(episodes)} episode(s).")
 
-            # Pre-check: auto-exclude episodes with recording errors and record them
-            # in quality_episodes so the caller can display a full recap.
+            # Pre-check: record quality data for all episodes; exclude those with
+            # recording errors unconditionally, and optionally exclude those with
+            # recording warnings or poor sync depending on caller flags.
             checks = precheck_episodes(episodes, log=log)
             for c in checks:
-                sync_bad = c.get("sync") is not None and c["sync"]["verdict"] != "GOOD"
+                sync = c.get("sync") or {}
+                sync_verdict = sync.get("verdict", "GOOD")
+                sync_msg = sync.get("message", "")
+                sync_excluded = (
+                    (exclude_sync_bad and sync_verdict == "BAD")
+                    or (exclude_sync_marginal and sync_verdict in ("BAD", "MARGINAL"))
+                )
+                sync_flagged = sync_verdict != "GOOD"
                 if c["errors"]:
                     quality_episodes.append({
                         "name": c["name"], "kind": "pre_check", "verdict": "ERROR",
                         "errors": list(c["errors"]),
-                        "warnings": list(c["warnings"]) + (
-                            [c["sync"]["message"]] if sync_bad else []
-                        ),
+                        "warnings": list(c["warnings"]) + ([sync_msg] if sync_flagged and sync_msg else []),
                         "excluded": True,
                     })
-                elif c["warnings"] or sync_bad:
+                elif c["warnings"] or sync_flagged:
+                    rec_excluded = exclude_recording_warn and bool(c["warnings"])
+                    ep_excluded = rec_excluded or sync_excluded
                     quality_episodes.append({
                         "name": c["name"], "kind": "pre_check", "verdict": "WARN",
                         "errors": [],
-                        "warnings": list(c["warnings"]) + (
-                            [c["sync"]["message"]] if sync_bad else []
-                        ),
-                        "excluded": False,
+                        "warnings": list(c["warnings"]) + ([sync_msg] if sync_flagged and sync_msg else []),
+                        "excluded": ep_excluded,
                     })
-            slam_input = [c["ep"] for c in checks if not c["errors"]]
+            slam_input = [
+                c["ep"] for c in checks
+                if not c["errors"]
+                and not (exclude_recording_warn and bool(c["warnings"]))
+                and not (
+                    (exclude_sync_bad and (c.get("sync") or {}).get("verdict") == "BAD")
+                    or (exclude_sync_marginal and (c.get("sync") or {}).get("verdict") in ("BAD", "MARGINAL"))
+                )
+            ]
             if not slam_input:
                 log("⚠ All episodes failed the recording check — nothing to process.")
             else:
@@ -300,6 +323,9 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
+                "exclude_recording_warn": req.exclude_recording_warn,
+                "exclude_sync_bad": req.exclude_sync_bad,
+                "exclude_sync_marginal": req.exclude_sync_marginal,
                 "private": req.private},
         daemon=True,
     )

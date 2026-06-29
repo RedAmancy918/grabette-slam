@@ -86,7 +86,7 @@ def run_recap(logs: list[str]) -> str:
         if (s.startswith("✓") and "tracking" in s) \
                 or s.startswith("✗") \
                 or s.startswith("•") \
-                or re.match(r"^\[(GOOD|WARN|BAD|FAIL|input/)", s):
+                or re.match(r"^\[(GOOD|WARN|BAD|FAIL|check/|sync/)", s):
             keep.append(s)
     if not keep:
         return ""
@@ -202,6 +202,7 @@ _VERDICT_BADGE = {
     "ERROR": ("#7f1d1d", "#fecaca"),
     "BAD": ("#991b1b", "#fee2e2"),
     "WARN": ("#92400e", "#fef3c7"),
+    "MARGINAL": ("#92400e", "#fef3c7"),
 }
 
 
