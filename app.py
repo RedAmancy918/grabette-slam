@@ -244,6 +244,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                     excluded = (
                         (exclude_fail and report.verdict == "FAIL")
                         or (exclude_bad and report.verdict == "BAD")
+                        or report.verdict == "WARN"
                     )
                     if excluded:
                         log(f"  • Excluded ({report.verdict}): {ep.name}")
