@@ -368,11 +368,20 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         except Exception as e:
             log(f"  ⚠️ couldn't resolve username for episode traceability: {e}")
 
+    # Per-episode tags (fixed_gripper / tracking_lost), auto-derived from the
+    # recording check + trajectory report, written into the LeRobot episode
+    # metadata so kept-but-flagged episodes stay filterable downstream.
+    from grabette_postprocess.checks.tags import episode_tags
+    report_by_ep = {ep: report for ep, report in results}
+    tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
+                         for ep in processed}
+
     if on_progress:
         on_progress(0, 0, "build")
     log(f"Building LeRobot dataset from {len(processed)} episode(s)…")
     build_dataset(repo_id=target_repo, episode_dirs=processed, task=task,
-                  root=Path(root), source_user=source_user)
+                  root=Path(root), source_user=source_user,
+                  tags_by_recording=tags_by_recording)
     return processed
 
 

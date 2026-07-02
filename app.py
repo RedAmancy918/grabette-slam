@@ -272,9 +272,13 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 if not kept:
                     log("⚠ No episode produced an acceptable trajectory — dataset not pushed.")
                 else:
+                    from grabette_postprocess.checks.tags import episode_tags
+                    report_by_ep = {ep: rep for ep, rep in slam_results}
+                    tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
+                                         for ep in kept}
                     log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
                     build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
-                                  root=ds_root)
+                                  root=ds_root, tags_by_recording=tags_by_recording)
                     n, link, _mode = push_lerobot(target_repo, task, ds_root,
                                                   len(kept), token=token, log=log,
                                                   private=private)

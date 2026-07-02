@@ -149,6 +149,36 @@ def _check_imu(ep_dir: Path, status: dict) -> None:
         warn.append("oak imu: no rotation samples (VIO init aid absent)")
 
 
+_JOINTS = ((0, "distal"), (1, "proximal"))  # value = [distal, proximal]
+
+
+def _angle_matrix(samples: list) -> np.ndarray | None:
+    """(N, 2) [distal, proximal] array from angle samples, or None when the
+    samples aren't usable [distal, proximal] pairs."""
+    raw = [s.get("value") for s in samples]
+    if not raw or not all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in raw):
+        return None
+    return np.asarray([v[:2] for v in raw], dtype=float)
+
+
+def static_gripper_joints(ep_dir: Path) -> list[str]:
+    """Names of the gripper joints (``"distal"`` / ``"proximal"``) that never move
+    over the whole episode — peak-to-peak range below ANGLE_STATIC_RANGE_RAD.
+
+    Empty when the gripper moved, or when angle_data.json is missing/unusable (we
+    can't claim a joint is stuck if we can't read it). The single source of truth
+    for the static-joint judgement, shared by the recording warning below and the
+    `fixed_gripper` episode tag (see checks.tags)."""
+    angle_path = Path(ep_dir) / "angle_data.json"
+    if not angle_path.is_file():
+        return []
+    vals = _angle_matrix(_samples(angle_path))
+    if vals is None:
+        return []
+    return [name for axis, name in _JOINTS
+            if float(np.ptp(vals[:, axis])) < ANGLE_STATIC_RANGE_RAD]
+
+
 def _check_gripper(ep_dir: Path, status: dict) -> None:
     """Gripper joint angles (angle_data.json): required for the dataset. Beyond
     presence/non-empty, warn only when a joint genuinely never moves — the distal
@@ -164,14 +194,14 @@ def _check_gripper(ep_dir: Path, status: dict) -> None:
         err.append("angle_data.json has no samples")
         return
 
-    raw = [s.get("value") for s in ang]
-    if not all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in raw):
+    vals = _angle_matrix(ang)
+    if vals is None:
         warn.append("angle: samples aren't [distal, proximal] pairs (can't assess motion)")
         return
-    vals = np.asarray([v[:2] for v in raw], dtype=float)
-    for axis, name in ((0, "distal"), (1, "proximal")):
-        rng = float(np.ptp(vals[:, axis]))
-        if rng < ANGLE_STATIC_RANGE_RAD:
+    static = set(static_gripper_joints(ep_dir))
+    for axis, name in _JOINTS:
+        if name in static:
+            rng = float(np.ptp(vals[:, axis]))
             warn.append(
                 f"angle: {name} joint appears static (range {np.degrees(rng):.2f}° "
                 f"over the whole episode)")

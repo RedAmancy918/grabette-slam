@@ -119,6 +119,7 @@ def build_dataset(
     image_size: tuple[int, int] = (720, 960),
     root: Path | None = None,
     source_user: str | None = None,
+    tags_by_recording: dict[str, list[str]] | None = None,
 ):
     """Build LeRobot v3 dataset from processed episode directories.
 
@@ -138,6 +139,11 @@ def build_dataset(
             sidecar mapping each episode to its source recording and this user,
             with a `name` like "20210102_chouziel". Used when several users push
             into the same repo (e.g. on branches) so episodes stay distinguishable.
+        tags_by_recording: optional {recording_name: [tag, ...]} map (keyed by
+            episode dir name, e.g. from checks.tags.episode_tags). When set, a
+            per-episode `tags` list column is written into the LeRobot episodes
+            metadata so downstream training can filter by tag (see
+            _write_episode_tags). Episodes with no entry get an empty list.
     """
     # Lazy import — lerobot is a heavy dependency
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -218,6 +224,8 @@ def build_dataset(
 
     if source_user:
         _write_episode_sources(Path(dataset.root), saved_recordings, source_user)
+    if tags_by_recording is not None:
+        _write_episode_tags(Path(dataset.root), saved_recordings, tags_by_recording)
 
     print(f"\nDataset complete: {repo_id}")
     if root:
@@ -241,6 +249,40 @@ def _write_episode_sources(ds_root: Path, recordings: list[str], user: str) -> N
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"episodes": entries}, indent=2))
     print(f"  Wrote {out.name}: {len(entries)} episode(s) tagged with user '{user}'")
+
+
+def _write_episode_tags(ds_root: Path, recordings: list[str],
+                        tags_by_recording: dict[str, list[str]]) -> None:
+    """Add a per-episode `tags` (list[str]) column to the LeRobot episodes metadata
+    (meta/episodes/*.parquet), aligned by episode_index (= save order).
+
+    LeRobot preserves extra episode-metadata columns and exposes them via
+    ``ds.meta.episodes[i]["tags"]``, so this stays inside the LeRobot format rather
+    than being an ignored sidecar. The column is always list<string> (empty list
+    when an episode has no tags) so the schema is stable whether or not any tag
+    fired. Uses pyarrow so the existing columns/types are preserved exactly."""
+    import glob
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    tags_by_index = {i: list(tags_by_recording.get(rec, []))
+                     for i, rec in enumerate(recordings)}
+    files = sorted(glob.glob(str(ds_root / "meta" / "episodes" / "**" / "*.parquet"),
+                             recursive=True))
+    total = 0
+    for f in files:
+        table = pq.read_table(f)
+        if "tags" in table.column_names:  # idempotent on a re-run
+            table = table.drop(["tags"])
+        indices = table.column("episode_index").to_pylist()
+        tags_arr = pa.array([tags_by_index.get(int(i), []) for i in indices],
+                            type=pa.list_(pa.string()))
+        table = table.append_column("tags", tags_arr)
+        pq.write_table(table, f)
+        total += len(indices)
+    n_tagged = sum(1 for v in tags_by_index.values() if v)
+    print(f"  Wrote per-episode tags: {total} episode(s), {n_tagged} with ≥1 tag")
 
 
 def push_dataset(repo_id: str, root: Path, *, private: bool = False,
