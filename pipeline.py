@@ -7,6 +7,7 @@ Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
 import os
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from functools import partial
 from pathlib import Path
 
 from grabette_postprocess.convert import convert_episode
@@ -107,14 +108,18 @@ def _run_parallel(episodes, fn, log, on_progress, phase, gate, should_stop):
     return out
 
 
-def _precheck_episode(ep: Path):
-    """Completeness + synchronization check for one raw episode, BEFORE SLAM
+def _precheck_episode(ep: Path, run_sync: bool = False):
+    """Content + (optional) synchronization check for one raw episode, BEFORE SLAM
     (runs in a worker thread). Returns (result_dict, log_lines).
 
     result_dict = {ep, name, errors, warnings, sync} where sync is the
-    arducam↔OAK-gyro verdict dict (or None when it couldn't be computed). The
-    caller uses errors/warnings/sync to decide which episodes to flag for the
-    pre-SLAM review. Operates on the raw recording layout (before convert_episode).
+    arducam↔OAK-gyro verdict dict, or None when the sync check was disabled
+    (run_sync=False, the default) or couldn't be computed. The caller uses
+    errors/warnings/sync to decide which episodes to flag for the pre-SLAM review.
+    Operates on the raw recording layout (before convert_episode).
+
+    run_sync: the OAK cam↔gyro sync check is a debug-only diagnostic (opt-in);
+    when False it's skipped entirely and sync stays None.
     """
     lines = []
     # require_right=False: the unused right OAK camera shouldn't gate a run — its
@@ -127,36 +132,44 @@ def _precheck_episode(ep: Path):
             lines.append(f"      • {msg}")
 
     sync = None
-    try:
-        sync = _check_sync(ep)
-    except Exception as e:  # a sync failure must never abort the whole run
-        lines.append(f"  ⚠️ {ep.name}: sync check failed: {e}")
-    if sync is not None:
-        lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {sync['message']}")
+    if run_sync:
+        try:
+            sync = _check_sync(ep)
+        except Exception as e:  # a sync failure must never abort the whole run
+            lines.append(f"  ⚠️ {ep.name}: sync check failed: {e}")
+        if sync is not None:
+            lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {sync['message']}")
 
     return {"ep": ep, "name": ep.name, "errors": chk["errors"],
             "warnings": chk["warnings"], "sync": sync}, lines
 
 
 def precheck_episodes(episode_dirs, log=print, should_stop=None, on_progress=None,
-                      gate=None) -> list[dict]:
-    """Completeness (check_recording) + arducam↔gyro sync on every episode, in
-    parallel, BEFORE any SLAM. Returns the per-episode check dicts, sorted by name
-    (see _precheck_episode for the dict shape)."""
-    results = _run_parallel(episode_dirs, _precheck_episode, log, on_progress,
+                      gate=None, run_sync=False) -> list[dict]:
+    """Content check (check_recording) + optional arducam↔gyro sync on every
+    episode, in parallel, BEFORE any SLAM. Returns the per-episode check dicts,
+    sorted by name (see _precheck_episode for the dict shape).
+
+    run_sync: when False (the default) the OAK cam↔gyro sync diagnostic is skipped;
+    set True for debugging."""
+    fn = partial(_precheck_episode, run_sync=run_sync)
+    results = _run_parallel(episode_dirs, fn, log, on_progress,
                             "check", gate, should_stop)
     return sorted(results, key=lambda c: c["name"])
 
 
-def _slam_episode(ep: Path):
+def _slam_episode(ep: Path, run_sync: bool = False):
     """Convert + SLAM + trajectory quality-check one episode (runs in a worker
     thread). Returns ((episode_dir | None, report | None), log_lines).
 
     The dir is None when SLAM produced no trajectory (the episode is dropped
     outright) — report is then None too. The trajectory verdict is returned so the
     caller can let the user drop flagged episodes before the dataset is built (see
-    build_lerobot's `review` hook). Completeness/sync are NOT re-checked here —
-    that happens in the pre-SLAM phase (precheck_episodes)."""
+    build_lerobot's `review` hook). Content/sync are NOT re-checked here — that
+    happens in the pre-SLAM phase (precheck_episodes).
+
+    run_sync: the post-SLAM image↔trajectory alignment is a debug-only diagnostic
+    (opt-in, informational — it never drops an episode); when False it's skipped."""
     lines = []
     lines.append(f"▶ {ep.name}: convert")
     convert_episode(ep)
@@ -180,23 +193,24 @@ def _slam_episode(ep: Path):
     # flow against the trajectory's angular velocity — the end-to-end image↔pose
     # offset the policy trains on. Complements the pre-SLAM OAK-cam↔gyro gate
     # (_check_sync), which only validates the SLAM inputs. Informational (never
-    # drops); a sync failure must never abort the run.
-    try:
-        sync = check_image_trajectory(ep)
-    except Exception as e:
-        sync = None
-        lines.append(f"  ⚠️ {ep.name}: image↔trajectory check failed: {e}")
-    if sync is not None:
-        msg = f"image↔trajectory lag {sync['lag'] * 1000:+.0f} ms (corr {sync['corr']:.2f})"
-        if sync["note"]:
-            msg += f" — {sync['note']}"
-        lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {msg}")
+    # drops); a sync failure must never abort the run. Debug-only (opt-in).
+    if run_sync:
+        try:
+            sync = check_image_trajectory(ep)
+        except Exception as e:
+            sync = None
+            lines.append(f"  ⚠️ {ep.name}: image↔trajectory check failed: {e}")
+        if sync is not None:
+            msg = f"image↔trajectory lag {sync['lag'] * 1000:+.0f} ms (corr {sync['corr']:.2f})"
+            if sync["note"]:
+                msg += f" — {sync['note']}"
+            lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {msg}")
 
     return (ep, report), lines
 
 
 def run_slam(episode_dirs, log=print, should_stop=None, on_progress=None,
-             gate=None) -> list[tuple[Path, "TrajectoryReport"]]:
+             gate=None, run_sync=False) -> list[tuple[Path, "TrajectoryReport"]]:
     """Convert + SLAM every given episode in parallel.
 
     Takes an explicit episode list (the pre-SLAM review may have dropped some) and
@@ -204,8 +218,11 @@ def run_slam(episode_dirs, log=print, should_stop=None, on_progress=None,
     produced a trajectory, sorted by episode name. SLAM-failed episodes are
     dropped outright. The report carries the quality verdict so the caller can
     offer the user a chance to drop flagged episodes before building.
-    """
-    results = _run_parallel(episode_dirs, _slam_episode, log, on_progress,
+
+    run_sync: forwarded to _slam_episode to enable the debug-only post-SLAM
+    image↔trajectory alignment diagnostic (off by default)."""
+    fn = partial(_slam_episode, run_sync=run_sync)
+    results = _run_parallel(episode_dirs, fn, log, on_progress,
                             "slam", gate, should_stop)
     processed = [(ep, report) for ep, report in results if ep is not None]
     return sorted(processed, key=lambda t: t[0].name)
@@ -264,7 +281,8 @@ def _push_to_branch(ds, target_repo, branch, log, token, attempts=3):
 
 def build_lerobot(dataset_dir, target_repo, task, root, log=print,
                   should_stop=None, to_branch=False, on_progress=None,
-                  token=None, gate=None, pre_review=None, review=None) -> list:
+                  token=None, gate=None, pre_review=None, review=None,
+                  run_sync=False) -> list:
     """Check + SLAM + build the LeRobot dataset on disk under `root`.
 
     Pipeline: completeness/sync prechecks → (pre_review drop) → convert+SLAM →
@@ -288,6 +306,8 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         build with the list of (episode_dir, trajectory_report) tuples. It returns
         the episode dirs to keep — letting the caller drop episodes whose
         trajectory check came back flagged. When None, every episode is kept.
+    run_sync: enable the debug-only sync diagnostics (pre-SLAM OAK cam↔gyro and
+        post-SLAM image↔trajectory). Off by default.
     """
     import os
 
@@ -301,7 +321,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
 
     # ---- Pre-SLAM phase: completeness + sync checks, then optional drop --------
     checks = precheck_episodes(episodes, log=log, should_stop=should_stop,
-                               on_progress=on_progress, gate=gate)
+                               on_progress=on_progress, gate=gate, run_sync=run_sync)
     if should_stop and should_stop():
         raise RuntimeError("Stopped by user — nothing pushed.")
     if pre_review is not None:
@@ -317,7 +337,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
 
     # ---- SLAM phase ------------------------------------------------------------
     results = run_slam(episodes, log=log, should_stop=should_stop,
-                       on_progress=on_progress, gate=gate)
+                       on_progress=on_progress, gate=gate, run_sync=run_sync)
     if should_stop and should_stop():
         raise RuntimeError("Stopped by user — nothing pushed.")
     if not results:

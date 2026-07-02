@@ -201,7 +201,7 @@ def _reset_view():
             *inputs_view("idle"))
 
 
-def _run(source_repo, target_repo, task, oauth_token, to_branch):
+def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
     """Streaming generator behind Run / Push-to-branch. Yields the 16-element
     `outputs` tuple: bar, log, summary, retry_state, the 8 buttons, then the 4
     inputs-view fields. The episode-review panel is a separate reactive @gr.render
@@ -404,7 +404,7 @@ def _run(source_repo, target_repo, task, oauth_token, to_branch):
                     raw, target_repo, task, root=ds_root,
                     log=print, should_stop=_stop.is_set, to_branch=to_branch,
                     on_progress=on_progress, token=token, gate=_wait_if_paused,
-                    pre_review=pre_review_cb, review=review_cb)
+                    pre_review=pre_review_cb, review=review_cb, run_sync=run_sync)
                 # Build done — dataset cached on disk; record it so that if the push
                 # fails, the "Retry push" button can reuse it (no re-running SLAM).
                 result["built"] = {"root": str(ds_root), "n": len(processed)}
@@ -558,14 +558,14 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
                state="finished", ctx=None)
 
 
-def run_pipeline(source_repo, target_repo, task,
+def run_pipeline(source_repo, target_repo, task, run_sync=False,
                  oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=False)
+    yield from _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch=False)
 
 
-def run_pipeline_branch(source_repo, target_repo, task,
+def run_pipeline_branch(source_repo, target_repo, task, run_sync=False,
                         oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, oauth_token, to_branch=True)
+    yield from _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch=True)
 
 
 def reset():

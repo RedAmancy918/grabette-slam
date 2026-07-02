@@ -57,6 +57,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
                                 placeholder="your-account/grabette-dataset")
             task = gr.Textbox(label="Task description", placeholder="cup grasping")
+            # Sync checks (OAK cam↔gyro pre-SLAM, image↔trajectory post-SLAM) are a
+            # debug-only diagnostic — off by default so a normal run skips them.
+            debug_sync = gr.Checkbox(
+                label="Run sync checks (debug)", value=False,
+                info="Extra camera↔IMU / image↔trajectory timing diagnostics")
             # Read-only recap of the inputs, shown in their place while running.
             selection_card = gr.HTML(visible=False)
             # Idle: only Run. Running: Run greyed to 'Running', + Pause + Cancel.
@@ -113,10 +118,10 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                confirm_branch_btn, retry_btn,
                run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn,
                source, target, task, selection_card]
-    run_event = run_btn.click(run_pipeline, inputs=[source, target, task],
+    run_event = run_btn.click(run_pipeline, inputs=[source, target, task, debug_sync],
                               outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
-                                            inputs=[source, target, task],
+                                            inputs=[source, target, task, debug_sync],
                                             outputs=outputs)
     retry_event = retry_btn.click(retry_push, inputs=[retry_state], outputs=outputs)
     reset_btn.click(reset, inputs=None, outputs=outputs)
@@ -154,18 +159,21 @@ class _ProcessReq(BaseModel):
     exclude_fail: bool = False
     exclude_bad: bool = False
     private: bool = False
+    run_sync: bool = False
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             task: str, token: str,
                             exclude_fail: bool = False,
                             exclude_bad: bool = False,
-                            private: bool = False) -> None:
+                            private: bool = False,
+                            run_sync: bool = False) -> None:
     """Run the pipeline synchronously in a background thread.
 
     exclude_fail: drop episodes with trajectory verdict FAIL.
     exclude_bad:  drop all BAD episodes.
     private:      create the LeRobot dataset repo as private.
+    run_sync:     enable the debug-only sync diagnostics (off by default).
     All episodes appear in the returned quality data (including excluded ones)
     so the caller can display a full recap.
     """
@@ -200,7 +208,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
             # Pre-check: record quality data for all episodes; exclude those with
             # recording errors unconditionally, and optionally exclude those with
             # recording warnings or poor sync depending on caller flags.
-            checks = precheck_episodes(episodes, log=log)
+            checks = precheck_episodes(episodes, log=log, run_sync=run_sync)
             for c in checks:
                 sync = c.get("sync") or {}
                 sync_verdict = sync.get("verdict", "GOOD")
@@ -225,7 +233,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 log("⚠ All episodes failed the recording check — nothing to process.")
             else:
                 # SLAM: convert + trajectory per episode.
-                slam_results = run_slam(slam_input, log=log)
+                slam_results = run_slam(slam_input, log=log, run_sync=run_sync)
                 slam_succeeded = {ep for ep, _ in slam_results}
 
                 # Record SLAM failures (no trajectory produced at all).
@@ -301,7 +309,7 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
-                "private": req.private},
+                "private": req.private, "run_sync": req.run_sync},
         daemon=True,
     )
     t.start()
