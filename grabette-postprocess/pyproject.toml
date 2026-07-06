@@ -11,7 +11,10 @@ dependencies = [
     "click",
     "pandas",
     "tqdm",
-    "lerobot>=0.5.0 ; python_version >= '3.12'",
+    # [dataset] pulls the HF `datasets` lib that LeRobot needs to build/push a
+    # dataset — it's an optional extra in lerobot>=0.5, not a core dep, so the
+    # bare requirement silently dropped it on an unpinned rebuild.
+    "lerobot[dataset]>=0.5.0 ; python_version >= '3.12'",
 ]
 
 [build-system]
