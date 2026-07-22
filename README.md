@@ -1,5 +1,5 @@
 ---
-title: Grabette Slam Test
+title: Grabette Slam
 emoji: 🌍
 colorFrom: blue
 colorTo: indigo
