@@ -160,6 +160,10 @@ class _ProcessReq(BaseModel):
     exclude_bad: bool = False
     private: bool = False
     run_sync: bool = False
+    # Device roles present in the raw dataset (e.g. ["left","right"]). >1 role
+    # → bimanual build (each episode combines the arms, uploaded by the fleet to
+    # {episode_id}/{role}/); ≤1 role (or empty) → the classic single-arm build.
+    roles: list[str] = []
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
@@ -167,7 +171,8 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             exclude_fail: bool = False,
                             exclude_bad: bool = False,
                             private: bool = False,
-                            run_sync: bool = False) -> None:
+                            run_sync: bool = False,
+                            roles: list[str] | None = None) -> None:
     """Run the pipeline synchronously in a background thread.
 
     exclude_fail: drop episodes with trajectory verdict FAIL.
@@ -197,8 +202,9 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
         ds_root = work / "lerobot"
 
         with contextlib.redirect_stdout(type("W", (), {"write": lambda s, m: log(m.rstrip()) or None, "flush": lambda s: None})()): # noqa: E501
-            from pipeline import find_episode_dirs, precheck_episodes, run_slam, push_lerobot
-            from grabette_postprocess.dataset import build_dataset
+            from pipeline import (find_episode_dirs, precheck_episodes, run_slam,
+                                  push_lerobot, pair_episodes_by_role)
+            from grabette_postprocess.dataset import build_dataset, build_dataset_multi
 
             episodes = find_episode_dirs(Path(raw))
             if not episodes:
@@ -273,13 +279,37 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 else:
                     from grabette_postprocess.checks.tags import episode_tags
                     report_by_ep = {ep: rep for ep, rep in slam_results}
-                    tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
-                                         for ep in kept}
-                    log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
-                    build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
-                                  root=ds_root, tags_by_recording=tags_by_recording)
+                    if roles:
+                        # Fleet path (raw uploaded by role, {episode_id}/{role}):
+                        # ONE uniform, role-prefixed schema for any arm count.
+                        # Mono (1 role) → left_cam0/action left_x… ; bimanual
+                        # (2 roles) → both arms. Pair the per-arm dirs back into
+                        # synchronized recordings (one LeRobot episode each).
+                        # Tags keyed by episode_id, prefixed by role so filtering
+                        # stays attributable per arm (e.g. left_tracking_lost).
+                        groups = pair_episodes_by_role(kept)
+                        tags_by_recording = {
+                            ep_id: [f"{role}_{t}" for role in sorted(group)
+                                    for t in episode_tags(group[role], report_by_ep.get(group[role]))]
+                            for ep_id, group in groups.items()
+                        }
+                        log(f"Building LeRobot dataset ({'+'.join(sorted(roles))}) "
+                            f"from {len(groups)} recording(s)…")
+                        build_dataset_multi(repo_id=target_repo, groups=groups,
+                                            roles=sorted(roles), task=task, root=ds_root,
+                                            tags_by_recording=tags_by_recording)
+                        n_built = len(groups)
+                    else:
+                        # Legacy device flow (flat layout, no role info): the
+                        # original unprefixed single-arm schema (cam0/cam1, 8D).
+                        tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
+                                             for ep in kept}
+                        log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
+                        build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
+                                      root=ds_root, tags_by_recording=tags_by_recording)
+                        n_built = len(kept)
                     n, link, _mode = push_lerobot(target_repo, task, ds_root,
-                                                  len(kept), token=token, log=log,
+                                                  n_built, token=token, log=log,
                                                   private=private)
                     result_link = link or f"https://huggingface.co/datasets/{target_repo}"
                     log(f"✅ Done — {n} episode(s).")
@@ -312,7 +342,7 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
-                "private": req.private, "run_sync": req.run_sync},
+                "private": req.private, "run_sync": req.run_sync, "roles": req.roles},
         daemon=True,
     )
     t.start()

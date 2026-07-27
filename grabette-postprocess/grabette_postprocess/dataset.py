@@ -151,6 +151,7 @@ def build_dataset(
     root: Path | None = None,
     source_user: str | None = None,
     tags_by_recording: dict[str, list[str]] | None = None,
+    recording_name_of=None,
 ):
     """Build LeRobot v3 dataset from processed episode directories.
 
@@ -171,13 +172,21 @@ def build_dataset(
             with a `name` like "20210102_chouziel". Used when several users push
             into the same repo (e.g. on branches) so episodes stay distinguishable.
         tags_by_recording: optional {recording_name: [tag, ...]} map (keyed by
-            episode dir name, e.g. from checks.tags.episode_tags). When set, a
-            per-episode `tags` list column is written into the LeRobot episodes
-            metadata so downstream training can filter by tag (see
-            _write_episode_tags). Episodes with no entry get an empty list.
+            the value recording_name_of returns for each episode dir, e.g. from
+            checks.tags.episode_tags). When set, a per-episode `tags` list column
+            is written into the LeRobot episodes metadata so downstream training
+            can filter by tag (see _write_episode_tags). Episodes with no entry
+            get an empty list.
+        recording_name_of: optional callable(ep_dir) -> recording name used to
+            key episodes in saved_recordings / tags / sources. Defaults to the
+            dir name (flat layout). Pass e.g. `lambda d: d.parent.name` when the
+            raw dataset is role-partitioned ({episode_id}/{role}), so episodes
+            key by episode_id instead of the (colliding) role.
     """
     # Lazy import — lerobot is a heavy dependency
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    name_of = recording_name_of or (lambda d: Path(d).name)
 
     if fps is None:
         fps = 50.0
@@ -267,7 +276,7 @@ def build_dataset(
             })
 
         dataset.save_episode()
-        saved_recordings.append(ep_dir.name)
+        saved_recordings.append(name_of(ep_dir))
         print(f"  Saved episode: {n_frames} frames")
 
     dataset.finalize()
@@ -280,6 +289,181 @@ def build_dataset(
     print(f"\nDataset complete: {repo_id}")
     if root:
         print(f"  Location: {root}")
+
+
+def _load_capture_started(ep_dir: Path) -> float | None:
+    """Wall-clock capture start (epoch seconds) from metadata.json's sync block.
+    Used to align the arms of a synchronized multi-device recording onto a common
+    clock. None when absent (a non-synchronized/solo recording) → treated as 0."""
+    p = Path(ep_dir) / "metadata.json"
+    if not p.is_file():
+        return None
+    try:
+        iso = (json.loads(p.read_text()).get("sync") or {}).get("capture_started_utc")
+        if not iso:
+            return None
+        from datetime import datetime
+        return datetime.fromisoformat(iso).timestamp()
+    except Exception:
+        return None
+
+
+def _load_arm_streams(ep_dir: Path, image_size: tuple[int, int]) -> dict:
+    """Load one arm's SLAM trajectory + 8D actions + is_lost + per-video
+    timestamps (cam0 RPi fisheye, cam1 OAK left) for nearest-ts frame selection,
+    plus its capture_started clock. Raises if the trajectory or a video is
+    missing (a valid grabette arm always has all of them)."""
+    ep_dir = Path(ep_dir).absolute()
+    traj_path = find_trajectory_csv(ep_dir)
+    if traj_path is None:
+        raise ValueError(f"no trajectory CSV in {ep_dir}")
+    df = load_trajectory_csv(traj_path)
+    traj_ts = df["timestamp"].values.astype(np.float64)
+    cam1_ts = _load_oak_left_timestamps(ep_dir)
+    if cam1_ts is None:
+        raise ValueError(f"no oakd_left timestamps in {ep_dir}")
+    return {
+        "dir": ep_dir,
+        "traj_ts": traj_ts,
+        "actions": _episode_actions(df, traj_ts, ep_dir),      # (N, 8)
+        "is_lost": df["is_lost"].astype(np.float32).values,     # (N,)
+        "cam0_path": ep_dir / "raw_video.mp4",
+        "cam0_ts": _load_video_timestamps(ep_dir, ep_dir / "raw_video.mp4"),
+        "cam1_path": ep_dir / "oakd_left.mp4",
+        "cam1_ts": cam1_ts,
+        "started": _load_capture_started(ep_dir),
+    }
+
+
+def build_dataset_multi(
+    repo_id: str,
+    groups: dict[str, dict[str, Path]],
+    roles: list[str],
+    task: str,
+    fps: float | None = None,
+    image_size: tuple[int, int] = (720, 960),
+    root: Path | None = None,
+    source_user: str | None = None,
+    tags_by_recording: dict[str, list[str]] | None = None,
+):
+    """Build a LeRobot v3 dataset with a uniform, role-prefixed schema for ONE OR
+    MORE arms (roles). Mono is just the single-role case of this: a lone left
+    grabette yields observation.images.left_cam0/left_cam1 + action [left_x…] (8D),
+    exactly the left block of a bimanual episode — so mono and bimanual share one
+    format, differing only in how many arms are present.
+
+    Per role: observation.images.{role}_cam0 (RPi fisheye) + {role}_cam1 (OAK
+    left); `action` is the per-role 8D absolute states concatenated (in `roles`
+    order); `is_lost` is per-role.
+
+    groups: {episode_id: {role: arm_episode_dir}} — one entry per synchronized
+        recording. A group missing any of `roles` is skipped (can't pair it).
+    The arms of one recording share a wall clock (synchronized start); we align
+    them frame-exactly via each recording's capture_started_utc, using the first
+    role as the reference timeline and sampling the others nearest-ts on it."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    if fps is None:
+        fps = 50.0
+        print(f"Using default fps: {int(fps)}")
+    h, w = image_size
+
+    features: dict = {}
+    for role in roles:
+        for cam in ("cam0", "cam1"):
+            features[f"observation.images.{role}_{cam}"] = {
+                "dtype": "video", "shape": (3, h, w),
+                "names": ["channels", "height", "width"],
+            }
+    per = ["x", "y", "z", "ax", "ay", "az", "proximal", "distal"]
+    features["action"] = {
+        "dtype": "float32", "shape": (8 * len(roles),),
+        "names": [f"{r}_{n}" for r in roles for n in per],
+    }
+    features["is_lost"] = {
+        "dtype": "float32", "shape": (len(roles),),
+        "names": [f"{r}_is_lost" for r in roles],
+    }
+
+    dataset = LeRobotDataset.create(
+        repo_id=repo_id, fps=int(fps), features=features, root=root,
+        robot_type="grabette", use_videos=True, vcodec="h264",
+        streaming_encoding=True,
+    )
+
+    ref_role = roles[0]
+    saved: list[str] = []
+    for ep_id in sorted(groups):
+        group = groups[ep_id]
+        missing = [r for r in roles if r not in group]
+        if missing:
+            print(f"  Skipping {ep_id}: missing arm(s) {missing}")
+            continue
+        print(f"\nProcessing {ep_id} ({'+'.join(roles)})...")
+        arms = {r: _load_arm_streams(group[r], image_size) for r in roles}
+        ref = arms[ref_role]
+        ref_ts = ref["traj_ts"]
+        n_frames = len(ref_ts)
+
+        # Per role: nearest indices into its trajectory + both videos, on the
+        # reference timeline shifted onto that arm's own clock (capture_started
+        # delta). For the reference role the shift is zero → identity mapping.
+        idxs: dict[str, tuple] = {}
+        caches: dict[str, tuple] = {}
+        for r in roles:
+            a = arms[r]
+            delta = 0.0
+            if a["started"] is not None and ref["started"] is not None:
+                delta = ref["started"] - a["started"]
+            q = ref_ts + delta
+            traj_idx = _nearest_frame_indices(q, a["traj_ts"])
+            cam0_idx = _nearest_frame_indices(q, a["cam0_ts"])
+            cam1_idx = _nearest_frame_indices(q, a["cam1_ts"])
+            idxs[r] = (traj_idx, cam0_idx, cam1_idx)
+            caches[r] = (
+                _load_video_frames_indexed(a["cam0_path"], image_size, set(cam0_idx.tolist())),
+                _load_video_frames_indexed(a["cam1_path"], image_size, set(cam1_idx.tolist())),
+            )
+
+        wrote = 0
+        for i in range(n_frames):
+            frame: dict = {"task": task}
+            act_parts, lost_parts = [], []
+            ok = True
+            for r in roles:
+                traj_idx, cam0_idx, cam1_idx = idxs[r]
+                cam0_cache, cam1_cache = caches[r]
+                im0 = cam0_cache.get(cam0_idx[i])
+                im1 = cam1_cache.get(cam1_idx[i])
+                if im0 is None or im1 is None:
+                    ok = False
+                    break
+                frame[f"observation.images.{r}_cam0"] = cv2.cvtColor(im0, cv2.COLOR_BGR2RGB)
+                frame[f"observation.images.{r}_cam1"] = cv2.cvtColor(im1, cv2.COLOR_BGR2RGB)
+                ti = traj_idx[i]
+                act_parts.append(arms[r]["actions"][ti])
+                lost_parts.append(arms[r]["is_lost"][ti])
+            if not ok:
+                print(f"  Warning: missing frame at step {i} for {ep_id}")
+                break
+            frame["action"] = np.concatenate(act_parts).astype(np.float32)
+            frame["is_lost"] = np.array(lost_parts, dtype=np.float32)
+            dataset.add_frame(frame)
+            wrote += 1
+
+        if wrote == 0:
+            print(f"  Skipping {ep_id}: no usable frames")
+            continue
+        dataset.save_episode()
+        saved.append(ep_id)
+        print(f"  Saved episode {ep_id}: {wrote} frames")
+
+    dataset.finalize()
+    if source_user:
+        _write_episode_sources(Path(dataset.root), saved, source_user)
+    if tags_by_recording is not None:
+        _write_episode_tags(Path(dataset.root), saved, tags_by_recording)
+    print(f"\nDataset complete: {repo_id}")
 
 
 def _write_episode_sources(ds_root: Path, recordings: list[str], user: str) -> None:

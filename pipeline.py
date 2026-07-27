@@ -40,6 +40,18 @@ def find_episode_dirs(root: Path) -> list[Path]:
     return find_episodes(root, anchor="oakd_left.mp4")
 
 
+def pair_episodes_by_role(arm_dirs) -> dict[str, dict[str, Path]]:
+    """Group per-arm episode dirs into synchronized recordings for the bimanual
+    build. The fleet uploads each device's stream to `{episode_id}/{role}/`, so
+    an arm dir's PARENT name is the episode id and its OWN name is the role.
+    Returns {episode_id: {role: arm_dir}}."""
+    groups: dict[str, dict[str, Path]] = {}
+    for d in arm_dirs:
+        d = Path(d)
+        groups.setdefault(d.parent.name, {})[d.name] = d
+    return groups
+
+
 def _run_parallel(episodes, fn, log, on_progress, phase, gate, should_stop):
     """Run fn(ep) -> (value, log_lines) over every episode concurrently, returning
     the list of values in completion order (callers sort/filter). Shared by the
