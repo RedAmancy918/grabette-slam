@@ -402,20 +402,40 @@ def build_dataset_multi(
         print(f"\nProcessing {ep_id} ({'+'.join(roles)})...")
         arms = {r: _load_arm_streams(group[r], image_size) for r in roles}
         ref = arms[ref_role]
-        ref_ts = ref["traj_ts"]
+        full_ref_ts = ref["traj_ts"]
+
+        # Per-arm capture_started delta (reference clock → arm clock) — this is
+        # what re-aligns arms that didn't start at the exact same instant.
+        deltas = {}
+        for r in roles:
+            a = arms[r]
+            deltas[r] = ((ref["started"] - a["started"])
+                         if (a["started"] is not None and ref["started"] is not None) else 0.0)
+
+        # Trim to the COMMON time window across arms, expressed on the reference
+        # timeline: [latest start, earliest end]. Each arm r covers wall times
+        # [first,last] on its own clock → [first - delta_r, last - delta_r] in
+        # reference time. Keeping only reference frames inside the intersection
+        # means every arm is sampled within its REAL range (no frozen first/last
+        # frame) and all arms get the SAME length (the overlap). With a
+        # synchronized start the low bound is ~0, so this effectively just cuts
+        # the longer arm's tail; it also guards the start if starts ever differ.
+        lo = max([full_ref_ts[0]] + [arms[r]["traj_ts"][0] - deltas[r] for r in roles])
+        hi = min([full_ref_ts[-1]] + [arms[r]["traj_ts"][-1] - deltas[r] for r in roles])
+        ref_ts = full_ref_ts[(full_ref_ts >= lo) & (full_ref_ts <= hi)]
         n_frames = len(ref_ts)
+        if n_frames == 0:
+            print(f"  Skipping {ep_id}: arms don't overlap in time")
+            continue
 
         # Per role: nearest indices into its trajectory + both videos, on the
-        # reference timeline shifted onto that arm's own clock (capture_started
-        # delta). For the reference role the shift is zero → identity mapping.
+        # (trimmed) reference timeline shifted onto that arm's own clock. For the
+        # reference role the shift is zero → maps back to its original indices.
         idxs: dict[str, tuple] = {}
         caches: dict[str, tuple] = {}
         for r in roles:
             a = arms[r]
-            delta = 0.0
-            if a["started"] is not None and ref["started"] is not None:
-                delta = ref["started"] - a["started"]
-            q = ref_ts + delta
+            q = ref_ts + deltas[r]
             traj_idx = _nearest_frame_indices(q, a["traj_ts"])
             cam0_idx = _nearest_frame_indices(q, a["cam0_ts"])
             cam1_idx = _nearest_frame_indices(q, a["cam1_ts"])
