@@ -5,6 +5,7 @@ Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
 """
 
 import os
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import partial
@@ -19,6 +20,13 @@ from grabette_postprocess.checks.recording import check_recording
 from grabette_postprocess.checks.sync import check_oak_imu, check_image_trajectory
 
 BINARY = os.environ.get("OAK_VSLAM_BINARY", "/usr/local/bin/offline_vslam")
+
+# LeRobot's push_to_hub (v0.6.0) takes no token argument — it resolves the HF
+# token from the process-global environment. Concurrent conversions run in
+# separate threads sharing os.environ, so two overlapping pushes would clobber
+# each other's token (wrong-account push / 401). Serialize the token-scoped push
+# and hold the token in the env ONLY for its duration (see push_lerobot).
+_PUSH_LOCK = threading.Lock()
 
 
 def _check_sync(episode_dir):
@@ -321,11 +329,9 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
     run_sync: enable the debug-only sync diagnostics (pre-SLAM OAK cam↔gyro and
         post-SLAM image↔trajectory). Off by default.
     """
-    import os
-
-    if token:
-        os.environ["HF_TOKEN"] = token
-
+    # No global HF_TOKEN here: this function only builds locally and resolves the
+    # username via an explicit HfApi(token=token).whoami() below; the actual push
+    # (push_lerobot) scopes the token under a lock itself.
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
         raise ValueError(f"No episodes (oakd_left.mp4) found under {dataset_dir}")
@@ -420,37 +426,50 @@ def push_lerobot(target_repo, task, root, n_episodes, to_branch=False,
 
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    if token:
-        os.environ["HF_TOKEN"] = token  # picked up by push_to_hub's internal HfApi
+    # push_to_hub reads the token from os.environ (no token arg). Serialize it and
+    # set the token ONLY for the duration of the push, restoring the previous env
+    # value after — so concurrent conversions never clobber each other's token and
+    # none is left lingering in the process environment. The heavy phases
+    # (download, SLAM, build) run outside this lock and stay parallel.
+    with _PUSH_LOCK:
+        _prev_token = os.environ.get("HF_TOKEN")
+        if token:
+            os.environ["HF_TOKEN"] = token
+        try:
+            ds = LeRobotDataset(target_repo, root=Path(root))
 
-    ds = LeRobotDataset(target_repo, root=Path(root))
+            if gate:
+                gate()  # pause checkpoint before the upload
+            if on_progress:
+                on_progress(0, 0, "push")
+            if to_branch:
+                branch = _branch_name(task)
+                log(f"Pushing to branch '{branch}' on {target_repo} …")
+                _push_to_branch(ds, target_repo, branch, log, token)
+                branch_url = f"https://huggingface.co/datasets/{target_repo}/tree/{branch}"
+                log(f"✅ Pushed to branch '{branch}'.")
+                return n_episodes, branch_url, "branch"
 
-    if gate:
-        gate()  # pause checkpoint before the upload
-    if on_progress:
-        on_progress(0, 0, "push")
-    if to_branch:
-        branch = _branch_name(task)
-        log(f"Pushing to branch '{branch}' on {target_repo} …")
-        _push_to_branch(ds, target_repo, branch, log, token)
-        branch_url = f"https://huggingface.co/datasets/{target_repo}/tree/{branch}"
-        log(f"✅ Pushed to branch '{branch}'.")
-        return n_episodes, branch_url, "branch"
-
-    log(f"Pushing to https://huggingface.co/datasets/{target_repo} …")
-    try:
-        ds.push_to_hub(tags=["lerobot", "grabette"], private=private)
-    except Exception as e:
-        # This path creates the repo (target didn't exist at pre-flight). A 401/403
-        # here means the sign-in token lacks the 'manage-repos' scope creation needs
-        # — pre-flight normally catches this, so reaching it implies partial/stale
-        # consent. Give the same actionable message rather than a raw HF traceback.
-        status = getattr(getattr(e, "response", None), "status_code", None)
-        if status in (401, 403):
-            raise RuntimeError(
-                f"Could not create '{target_repo}' (HTTP {status}): creating a new "
-                f"dataset needs the 'manage-repos' permission, which your sign-in "
-                f"token is missing. Sign out and back in to grant it, then re-run."
-            ) from e
-        raise
-    return n_episodes, None, "main"
+            log(f"Pushing to https://huggingface.co/datasets/{target_repo} …")
+            try:
+                ds.push_to_hub(tags=["lerobot", "grabette"], private=private)
+            except Exception as e:
+                # This path creates the repo (target didn't exist at pre-flight). A
+                # 401/403 here means the sign-in token lacks the 'manage-repos' scope
+                # creation needs — pre-flight normally catches this, so reaching it
+                # implies partial/stale consent. Give an actionable message.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (401, 403):
+                    raise RuntimeError(
+                        f"Could not create '{target_repo}' (HTTP {status}): creating a new "
+                        f"dataset needs the 'manage-repos' permission, which your sign-in "
+                        f"token is missing. Sign out and back in to grant it, then re-run."
+                    ) from e
+                raise
+            return n_episodes, None, "main"
+        finally:
+            # Restore the previous env token (or clear it) so nothing leaks out.
+            if _prev_token is None:
+                os.environ.pop("HF_TOKEN", None)
+            else:
+                os.environ["HF_TOKEN"] = _prev_token

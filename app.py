@@ -191,7 +191,10 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
 
     result_link: str | None = None
     try:
-        os.environ["HF_TOKEN"] = token
+        # No global os.environ["HF_TOKEN"] here — every HF call below passes the
+        # token explicitly (HfApi / snapshot_download / delete_repo), and the push
+        # scopes it under a lock itself (see push_lerobot). Setting it globally
+        # would let concurrent conversions clobber each other's token.
         api = HfApi(token=token)
         log(f"Downloading {source_repo}…")
         work = Path(tempfile.mkdtemp())
@@ -322,12 +325,18 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
     except Exception as e:
         _rest_jobs[job_id].update(status="error", error=str(e), quality=quality_episodes)
     finally:
-        # Always clean up the raw source dataset regardless of outcome.
-        try:
-            api.delete_repo(source_repo, repo_type="dataset")
-            log(f"Deleted raw dataset {source_repo}.")
-        except Exception as e:
-            log(f"Warning: could not delete raw dataset: {e}")
+        # Clean up the raw source ONLY on success. On failure keep it, so the
+        # run can be inspected and retried WITHOUT re-uploading from the devices
+        # (the upload is the slow part). `api` may be unset if we failed before
+        # it was built — the success gate avoids touching it in that case.
+        if _rest_jobs[job_id].get("status") == "done":
+            try:
+                api.delete_repo(source_repo, repo_type="dataset")
+                log(f"Deleted raw dataset {source_repo}.")
+            except Exception as e:
+                log(f"Warning: could not delete raw dataset: {e}")
+        else:
+            log(f"Kept raw dataset {source_repo} (run did not complete) — inspect or retry.")
 
 
 @fastapi_app.post("/api/process")
