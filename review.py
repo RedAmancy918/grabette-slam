@@ -96,15 +96,21 @@ def build_panel(review_state) -> None:
             f"The other episodes are kept. "
             f"**{len(kept)}** flagged and kept."
         )
-        for it in items:
-            if it["name"] in dropped:
-                continue  # removed → its card has disappeared
-            with gr.Row(equal_height=True):
-                gr.HTML(episode_card(it))
-                gr.Button("🗑", size="sm", scale=0, min_width=52,
-                          elem_classes=["btn-red"]).click(
-                    drop_episode, inputs=gr.State(it["name"]), outputs=review_state)
-        with gr.Row():
+        # The card list scrolls on its own (#review-cards) and the action row is
+        # sticky (#review-actions), so Continue stays reachable however many
+        # episodes are flagged — the run is BLOCKED on that click, and the page
+        # itself can't be scrolled to chase it inside the Space's iframe (see the
+        # scrolling note in views.CSS).
+        with gr.Column(elem_id="review-cards"):
+            for it in items:
+                if it["name"] in dropped:
+                    continue  # removed → its card has disappeared
+                with gr.Row(equal_height=True):
+                    gr.HTML(episode_card(it))
+                    gr.Button("🗑", size="sm", scale=0, min_width=52,
+                              elem_classes=["btn-red"]).click(
+                        drop_episode, inputs=gr.State(it["name"]), outputs=review_state)
+        with gr.Row(elem_id="review-actions"):
             gr.Button(f"▶  Continue ({action} kept episodes)",
                       size="sm", elem_classes=["btn-orange"]).click(
                 submit_review, inputs=None, outputs=None)

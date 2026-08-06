@@ -272,7 +272,15 @@ def episode_card(it: dict) -> str:
 THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
 
 CSS = """
-.gradio-container {max-width: 1080px !important; margin: 0 auto !important;}
+/* The app must scroll INSIDE its own container, never rely on the page scrolling:
+   Gradio's page posts {SET_SCROLLING: false} to its parent, so on HF Spaces the
+   Space embeds it in an <iframe scrolling="no"> — a wheel gesture then does
+   nothing and anything below the fold is unreachable (the episode-review
+   Continue button, which a run BLOCKS on, was the visible symptom). Capping the
+   container to the viewport gives it its own scrollbar, which works whether the
+   app is embedded or opened directly. */
+.gradio-container {max-width: 1080px !important; margin: 0 auto !important;
+                   max-height: 100vh; overflow-y: auto;}
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}
 #app-header p {color: var(--body-text-color-subdued); margin: 2px 0 0; font-size: .9rem;}
@@ -280,13 +288,26 @@ CSS = """
                   font-size: 12px; line-height: 1.35;}
 footer {display: none !important;}
 /* Episode-review actions: orange to match the flagged-episode cards (warning),
-   not the default emerald primary. */
-.btn-orange button {background: #f97316 !important; border: none !important;
-                    color: #fff !important;}
-.btn-orange button:hover {background: #ea580c !important;}
+   not the default emerald primary.
+   Both `.btn-x` and `.btn-x button` are targeted because Gradio 6 puts
+   elem_classes on the <button> itself, while earlier versions put them on a
+   wrapper div — with only the descendant selector the buttons rendered plain
+   white (the 🗑 one nearly invisible on the card row). */
+.btn-orange, .btn-orange button {background: #f97316 !important; border: none !important;
+                                 color: #fff !important;}
+.btn-orange:hover, .btn-orange button:hover {background: #ea580c !important;}
 /* The 🗑 remove-episode button: solid red (the Soft theme renders variant="stop"
    as a pale/outline style, so force it). */
-.btn-red button {background: #dc2626 !important; border: none !important;
-                 color: #fff !important;}
-.btn-red button:hover {background: #b91c1c !important;}
+.btn-red, .btn-red button {background: #dc2626 !important; border: none !important;
+                           color: #fff !important;}
+.btn-red:hover, .btn-red button:hover {background: #b91c1c !important;}
+/* Episode review: the flagged-card list gets its own scrollbar and the action row
+   sticks to the bottom of the viewport, so 'Continue' is one wheel-tick away
+   whether 2 or 30 episodes are flagged (the worker is blocked until it's clicked). */
+#review-cards {max-height: 46vh; overflow-y: auto; padding-right: 4px;}
+/* Keep 🗑 an icon-sized button next to its card: Gradio 6 lays every Button out as
+   `flex: 1 1 0%` and ignores scale=0, so it would otherwise take half the row. */
+#review-cards .btn-red {flex: 0 0 52px !important;}
+#review-actions {position: sticky; bottom: 0; z-index: 3; padding: 6px 0 2px;
+                 background: var(--body-background-fill);}
 """
