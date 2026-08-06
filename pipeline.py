@@ -13,7 +13,6 @@ from pathlib import Path
 
 from grabette_postprocess.convert import convert_episode
 from grabette_postprocess.oak_slam import run_oak_slam
-from grabette_postprocess.dataset import build_dataset
 from grabette_postprocess.episode_manager import find_episodes
 from grabette_postprocess.checks.trajectory import check_trajectory
 from grabette_postprocess.checks.recording import check_recording
@@ -58,6 +57,100 @@ def pair_episodes_by_role(arm_dirs) -> dict[str, dict[str, Path]]:
         d = Path(d)
         groups.setdefault(d.parent.name, {})[d.name] = d
     return groups
+
+
+# Device roles the fleet records with. A raw dataset uploaded by the fleet puts
+# each device's stream in `{episode_id}/{role}/`, so an episode dir named after
+# one of these is an ARM of a (possibly multi-arm) recording, not a recording.
+# Episode ids are timestamps ("20250101_120000"), so there's no ambiguity.
+ROLE_SLOTS = ("left", "right", "casquette")
+
+
+def detect_roles(episode_dirs) -> list[str]:
+    """The device roles present in a raw dataset, inferred from its layout.
+
+    Returns the sorted roles when EVERY episode dir is a role dir (the fleet's
+    `{episode_id}/{role}/` layout), else [] for the legacy flat layout uploaded
+    by a lone grabette (`episodes/{episode_id}/`).
+
+    This is what keeps the UI run consistent with the REST run: the API is told
+    the roles explicitly by the fleet, while the UI only has the raw repo — so it
+    reads them back off the layout instead of silently building a single-arm
+    dataset from a bimanual recording."""
+    names = {Path(d).name for d in episode_dirs}
+    if names and names <= set(ROLE_SLOTS):
+        return sorted(names)
+    return []
+
+
+def episode_label(ep: Path) -> str:
+    """Unique, human-readable name for one episode dir.
+
+    In the fleet's role layout the dir's own name is just the role ("left"), the
+    same for every recording — so qualify it with the recording id. Used for log
+    lines, quality entries and the review panel, where a name doubles as the key
+    identifying which episode the user dropped."""
+    ep = Path(ep)
+    return f"{ep.parent.name}/{ep.name}" if ep.name in ROLE_SLOTS else ep.name
+
+
+def build_recordings(target_repo, task, root, episodes, report_by_ep,
+                     roles=None, source_user=None, log=print) -> list:
+    """Build the LeRobot dataset on disk from the kept episode dirs, picking the
+    schema from the raw layout. Shared by the UI run (build_lerobot) and the
+    headless REST run so both produce the SAME dataset for the same raw input.
+
+    roles: the device roles present, when the caller already knows them (the REST
+        API is told by the fleet). None/empty → inferred from the layout via
+        detect_roles.
+
+    With roles → ONE uniform, role-prefixed schema for any arm count (mono is the
+    single-role case: left_cam0/left_cam1 + 8D left action; bimanual adds the
+    right block), built from the per-arm dirs paired back into synchronized
+    recordings. Without → the legacy flat single-arm schema (cam0/cam1, 8D).
+
+    Returns the list of built recordings (recording ids in the role layout,
+    episode dirs in the flat one); callers use its length as the episode count.
+    """
+    from grabette_postprocess.checks.tags import episode_tags
+    from grabette_postprocess.dataset import build_dataset, build_dataset_multi
+
+    roles = sorted(roles) if roles else detect_roles(episodes)
+    if not roles:
+        tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
+                             for ep in episodes}
+        log(f"Building LeRobot dataset from {len(episodes)} episode(s)…")
+        build_dataset(repo_id=target_repo, episode_dirs=episodes, task=task,
+                      root=Path(root), source_user=source_user,
+                      tags_by_recording=tags_by_recording)
+        return list(episodes)
+
+    # Role layout: pair the per-arm dirs back into one LeRobot episode each. A
+    # recording missing an arm can't be paired (the arm was dropped in review or
+    # never uploaded) — skip it here rather than deep inside the builder, so the
+    # returned count matches what is actually written.
+    groups = pair_episodes_by_role(episodes)
+    for ep_id in sorted(groups):
+        missing = [r for r in roles if r not in groups[ep_id]]
+        if missing:
+            log(f"  • Skipping {ep_id}: missing arm(s) {', '.join(missing)}")
+            groups.pop(ep_id)
+    if not groups:
+        raise RuntimeError(
+            f"No recording has all the arms ({'+'.join(roles)}) — nothing to push.")
+    # Tags keyed by recording id, prefixed by role so filtering stays attributable
+    # per arm (e.g. left_tracking_lost).
+    tags_by_recording = {
+        ep_id: [f"{role}_{t}" for role in sorted(group)
+                for t in episode_tags(group[role], report_by_ep.get(group[role]))]
+        for ep_id, group in groups.items()
+    }
+    log(f"Building LeRobot dataset ({'+'.join(roles)}) from "
+        f"{len(groups)} recording(s)…")
+    build_dataset_multi(repo_id=target_repo, groups=groups, roles=roles, task=task,
+                        root=Path(root), source_user=source_user,
+                        tags_by_recording=tags_by_recording)
+    return sorted(groups)
 
 
 def _run_parallel(episodes, fn, log, on_progress, phase, gate, should_stop):
@@ -142,12 +235,13 @@ def _precheck_episode(ep: Path, run_sync: bool = False):
     when False it's skipped entirely and sync stays None.
     """
     lines = []
+    name = episode_label(ep)
     # require_right=False: the unused right OAK camera shouldn't gate a run — its
     # absence is irrelevant to SLAM/dataset, even though we now download it.
     chk = check_recording(ep, require_right=False)
     if chk["errors"] or chk["warnings"]:
         verdict = "ERROR" if chk["errors"] else "WARN"
-        lines.append(f"  [check/{verdict}] {ep.name}")
+        lines.append(f"  [check/{verdict}] {name}")
         for msg in (*chk["errors"], *chk["warnings"]):
             lines.append(f"      • {msg}")
 
@@ -156,11 +250,11 @@ def _precheck_episode(ep: Path, run_sync: bool = False):
         try:
             sync = _check_sync(ep)
         except Exception as e:  # a sync failure must never abort the whole run
-            lines.append(f"  ⚠️ {ep.name}: sync check failed: {e}")
+            lines.append(f"  ⚠️ {name}: sync check failed: {e}")
         if sync is not None:
-            lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {sync['message']}")
+            lines.append(f"  [sync/{sync['verdict']}] {name}: {sync['message']}")
 
-    return {"ep": ep, "name": ep.name, "errors": chk["errors"],
+    return {"ep": ep, "name": name, "errors": chk["errors"],
             "warnings": chk["warnings"], "sync": sync}, lines
 
 
@@ -191,19 +285,20 @@ def _slam_episode(ep: Path, run_sync: bool = False):
     run_sync: the post-SLAM image↔trajectory alignment is a debug-only diagnostic
     (opt-in, informational — it never drops an episode); when False it's skipped."""
     lines = []
-    lines.append(f"▶ {ep.name}: convert")
+    name = episode_label(ep)
+    lines.append(f"▶ {name}: convert")
     convert_episode(ep)
 
-    lines.append(f"▶ {ep.name}: SLAM")
+    lines.append(f"▶ {name}: SLAM")
     r = run_oak_slam(ep, binary=BINARY, show_progress=False)
     if r.trajectory_path is None:
-        lines.append(f"  ✗ {ep.name}: SLAM failed (rc={r.returncode})")
+        lines.append(f"  ✗ {name}: SLAM failed (rc={r.returncode})")
         return (None, None), lines
-    lines.append(f"  ✓ {ep.name}: tracking {r.tracking_pct:.1f}% ({r.tracked_frames}/{r.total_frames})")
+    lines.append(f"  ✓ {name}: tracking {r.tracking_pct:.1f}% ({r.tracked_frames}/{r.total_frames})")
 
     report = check_trajectory(r.trajectory_path, ep / "slam_metadata.json")
     lines.append(
-        f"  [{report.verdict}] {ep.name}: dist={report.total_distance_m:.2f}m "
+        f"  [{report.verdict}] {name}: dist={report.total_distance_m:.2f}m "
         f"med_step={report.median_step_mm:.1f}mm jumps={report.n_jumps}"
     )
     for msg in (*report.errors, *report.warnings):
@@ -219,12 +314,12 @@ def _slam_episode(ep: Path, run_sync: bool = False):
             sync = check_image_trajectory(ep)
         except Exception as e:
             sync = None
-            lines.append(f"  ⚠️ {ep.name}: image↔trajectory check failed: {e}")
+            lines.append(f"  ⚠️ {name}: image↔trajectory check failed: {e}")
         if sync is not None:
             msg = f"image↔trajectory lag {sync['lag'] * 1000:+.0f} ms (corr {sync['corr']:.2f})"
             if sync["note"]:
                 msg += f" — {sync['note']}"
-            lines.append(f"  [sync/{sync['verdict']}] {ep.name}: {msg}")
+            lines.append(f"  [sync/{sync['verdict']}] {name}: {msg}")
 
     return (ep, report), lines
 
@@ -245,7 +340,10 @@ def run_slam(episode_dirs, log=print, should_stop=None, on_progress=None,
     results = _run_parallel(episode_dirs, fn, log, on_progress,
                             "slam", gate, should_stop)
     processed = [(ep, report) for ep, report in results if ep is not None]
-    return sorted(processed, key=lambda t: t[0].name)
+    # Sort on the full path, not the dir name: in the fleet's {episode_id}/{role}
+    # layout the name is just the role, so sorting by it would interleave the
+    # recordings instead of keeping a recording's arms adjacent.
+    return sorted(processed, key=lambda t: str(t[0]))
 
 
 def _branch_name(task: str) -> str:
@@ -306,8 +404,10 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
     """Check + SLAM + build the LeRobot dataset on disk under `root`.
 
     Pipeline: completeness/sync prechecks → (pre_review drop) → convert+SLAM →
-    (trajectory review drop) → build. Returns the list of processed episode dirs.
-    Does NOT push — call push_lerobot() afterwards. Splitting build from push lets
+    (trajectory review drop) → build. Returns the list of built recordings — one
+    entry per LeRobot episode written, so len() is the episode count to push (see
+    build_recordings: recording ids in the fleet's role layout, episode dirs in
+    the flat one). Does NOT push — call push_lerobot() afterwards. Splitting build from push lets
     a failed push be retried (the built dataset stays on disk) without re-running
     the slow SLAM step.
 
@@ -335,7 +435,8 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
         raise ValueError(f"No episodes (oakd_left.mp4) found under {dataset_dir}")
-    log(f"Found {len(episodes)} episode(s) : {', '.join(ep.name for ep in episodes)}")
+    log(f"Found {len(episodes)} episode(s) : "
+        f"{', '.join(episode_label(ep) for ep in episodes)}")
 
     # ---- Pre-SLAM phase: completeness + sync checks, then optional drop --------
     checks = precheck_episodes(episodes, log=log, should_stop=should_stop,
@@ -386,21 +487,19 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         except Exception as e:
             log(f"  ⚠️ couldn't resolve username for episode traceability: {e}")
 
-    # Per-episode tags (fixed_gripper / tracking_lost), auto-derived from the
-    # recording check + trajectory report, written into the LeRobot episode
-    # metadata so kept-but-flagged episodes stay filterable downstream.
-    from grabette_postprocess.checks.tags import episode_tags
-    report_by_ep = {ep: report for ep, report in results}
-    tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
-                         for ep in processed}
-
     if on_progress:
         on_progress(0, 0, "build")
-    log(f"Building LeRobot dataset from {len(processed)} episode(s)…")
-    build_dataset(repo_id=target_repo, episode_dirs=processed, task=task,
-                  root=Path(root), source_user=source_user,
-                  tags_by_recording=tags_by_recording)
-    return processed
+    # The schema follows the RAW layout (see build_recordings): a fleet upload
+    # ({episode_id}/{role}) builds the role-prefixed schema with every arm it
+    # contains — so a bimanual raw dataset yields a bimanual LeRobot dataset here
+    # exactly as it does through the REST API. A flat legacy upload stays on the
+    # original single-arm schema. Per-episode tags (fixed_gripper /
+    # tracking_lost), auto-derived from the recording check + trajectory report,
+    # are written into the LeRobot episode metadata by build_recordings so
+    # kept-but-flagged episodes stay filterable downstream.
+    report_by_ep = {ep: report for ep, report in results}
+    return build_recordings(target_repo, task, root, processed, report_by_ep,
+                            source_user=source_user, log=log)
 
 
 def push_lerobot(target_repo, task, root, n_episodes, to_branch=False,

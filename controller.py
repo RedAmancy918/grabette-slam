@@ -21,7 +21,7 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 
 import review
-from pipeline import build_lerobot, push_lerobot
+from pipeline import build_lerobot, episode_label, push_lerobot
 from views import bar, btns, error_card, inputs_view, io, run_recap, success_summary
 
 # Cooperative control flags, shared between the worker and the control buttons.
@@ -310,7 +310,10 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         """Publish `items` to the (kind="input"/"trajectory") review panel, block
         the worker until Continue (or a cancel), then return the kept episode dirs.
 
-        all_eps is the full [(name, ep_dir), …] in order; the kept subset is the
+        all_eps is the full [(name, ep_dir), …] in order, where name is the
+        episode's UNIQUE label (episode_label — in the fleet's role layout the dir
+        name alone is just "left"/"right", shared by every recording, so dropping
+        one card would drop that arm of every recording); the kept subset is the
         episodes the user did NOT remove (🗑). On cancel the full set is returned
         and the build then hits should_stop and raises — so nothing is pushed."""
         review._review_kind[0] = kind
@@ -367,7 +370,7 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         if not flagged:
             return [ep for ep, _ in results]
         items = [
-            {"name": ep.name, "verdict": rep.verdict,
+            {"name": episode_label(ep), "verdict": rep.verdict,
              "n_tracked": rep.n_tracked, "tracking_pct": rep.tracking_pct,
              "total_distance_m": rep.total_distance_m, "duration_s": rep.duration_s,
              "median_step_mm": rep.median_step_mm, "median_angle_deg": rep.median_angle_deg,
@@ -377,7 +380,8 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         ]
         print(f"⏸ Trajectory review: {len(flagged)} of {len(results)} episode(s) flagged "
               f"— remove the ones to drop (🗑), then click Continue.")
-        return _review_gate("trajectory", items, [(ep.name, ep) for ep, _ in results])
+        return _review_gate("trajectory", items,
+                            [(episode_label(ep), ep) for ep, _ in results])
 
     def worker():
         writer = _LineQueueWriter(q)
@@ -400,16 +404,18 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
                 print("Download complete.\n\n")
                 q.put(("progress", 0.30, "converting"))
                 ds_root = work / "lerobot"
-                processed = build_lerobot(
+                # One entry per LeRobot episode written — in a bimanual raw
+                # dataset that's one per recording (both arms), not one per arm.
+                built = build_lerobot(
                     raw, target_repo, task, root=ds_root,
                     log=print, should_stop=_stop.is_set, to_branch=to_branch,
                     on_progress=on_progress, token=token, gate=_wait_if_paused,
                     pre_review=pre_review_cb, review=review_cb, run_sync=run_sync)
                 # Build done — dataset cached on disk; record it so that if the push
                 # fails, the "Retry push" button can reuse it (no re-running SLAM).
-                result["built"] = {"root": str(ds_root), "n": len(processed)}
+                result["built"] = {"root": str(ds_root), "n": len(built)}
                 n, link, mode = push_lerobot(
-                    target_repo, task, ds_root, len(processed),
+                    target_repo, task, ds_root, len(built),
                     to_branch=to_branch, token=token, log=print,
                     on_progress=on_progress, gate=_wait_if_paused)
                 writer.flush()

@@ -205,9 +205,9 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
         ds_root = work / "lerobot"
 
         with contextlib.redirect_stdout(type("W", (), {"write": lambda s, m: log(m.rstrip()) or None, "flush": lambda s: None})()): # noqa: E501
-            from pipeline import (find_episode_dirs, precheck_episodes, run_slam,
-                                  push_lerobot, pair_episodes_by_role)
-            from grabette_postprocess.dataset import build_dataset, build_dataset_multi
+            from pipeline import (build_recordings, episode_label,
+                                  find_episode_dirs, precheck_episodes, run_slam,
+                                  push_lerobot)
 
             episodes = find_episode_dirs(Path(raw))
             if not episodes:
@@ -249,7 +249,7 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 for ep in slam_input:
                     if ep not in slam_succeeded:
                         quality_episodes.append({
-                            "name": ep.name, "kind": "slam", "verdict": "FAIL",
+                            "name": episode_label(ep), "kind": "slam", "verdict": "FAIL",
                             "tracking_pct": 0.0, "n_jumps": 0, "total_distance_m": 0.0,
                             "errors": ["SLAM failed: no trajectory produced"],
                             "warnings": [], "excluded": True,
@@ -263,11 +263,11 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                         or (exclude_bad and report.verdict == "BAD")
                     )
                     if excluded:
-                        log(f"  • Excluded ({report.verdict}): {ep.name}")
+                        log(f"  • Excluded ({report.verdict}): {episode_label(ep)}")
                     else:
                         kept.append(ep)
                     quality_episodes.append({
-                        "name": ep.name, "kind": "trajectory",
+                        "name": episode_label(ep), "kind": "trajectory",
                         "verdict": report.verdict,
                         "tracking_pct": round(report.tracking_pct, 1),
                         "n_jumps": report.n_jumps,
@@ -280,37 +280,15 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                 if not kept:
                     log("⚠ No episode produced an acceptable trajectory — dataset not pushed.")
                 else:
-                    from grabette_postprocess.checks.tags import episode_tags
+                    # Same builder as the UI run: `roles` (given by the fleet, raw
+                    # uploaded to {episode_id}/{role}) selects the uniform
+                    # role-prefixed schema for any arm count; when absent it is
+                    # inferred from the layout, so a legacy flat upload keeps the
+                    # original single-arm schema.
                     report_by_ep = {ep: rep for ep, rep in slam_results}
-                    if roles:
-                        # Fleet path (raw uploaded by role, {episode_id}/{role}):
-                        # ONE uniform, role-prefixed schema for any arm count.
-                        # Mono (1 role) → left_cam0/action left_x… ; bimanual
-                        # (2 roles) → both arms. Pair the per-arm dirs back into
-                        # synchronized recordings (one LeRobot episode each).
-                        # Tags keyed by episode_id, prefixed by role so filtering
-                        # stays attributable per arm (e.g. left_tracking_lost).
-                        groups = pair_episodes_by_role(kept)
-                        tags_by_recording = {
-                            ep_id: [f"{role}_{t}" for role in sorted(group)
-                                    for t in episode_tags(group[role], report_by_ep.get(group[role]))]
-                            for ep_id, group in groups.items()
-                        }
-                        log(f"Building LeRobot dataset ({'+'.join(sorted(roles))}) "
-                            f"from {len(groups)} recording(s)…")
-                        build_dataset_multi(repo_id=target_repo, groups=groups,
-                                            roles=sorted(roles), task=task, root=ds_root,
-                                            tags_by_recording=tags_by_recording)
-                        n_built = len(groups)
-                    else:
-                        # Legacy device flow (flat layout, no role info): the
-                        # original unprefixed single-arm schema (cam0/cam1, 8D).
-                        tags_by_recording = {ep.name: episode_tags(ep, report_by_ep.get(ep))
-                                             for ep in kept}
-                        log(f"Building LeRobot dataset from {len(kept)} episode(s)…")
-                        build_dataset(repo_id=target_repo, episode_dirs=kept, task=task,
-                                      root=ds_root, tags_by_recording=tags_by_recording)
-                        n_built = len(kept)
+                    built = build_recordings(target_repo, task, ds_root, kept,
+                                             report_by_ep, roles=roles, log=log)
+                    n_built = len(built)
                     n, link, _mode = push_lerobot(target_repo, task, ds_root,
                                                   n_built, token=token, log=log,
                                                   private=private)
