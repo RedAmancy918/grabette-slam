@@ -164,6 +164,13 @@ class _ProcessReq(BaseModel):
     # → bimanual build (each episode combines the arms, uploaded by the fleet to
     # {episode_id}/{role}/); ≤1 role (or empty) → the classic single-arm build.
     roles: list[str] = []
+    # Leave the raw source dataset in place after a successful conversion. Defaults
+    # to True: the raw is currently NEVER auto-deleted — re-uploading it from the
+    # devices is the slow part of a rebuild, and a caller that cancels mid-build
+    # would otherwise be left with a half-deleted source. The fleet sends this
+    # explicitly (see GRABETTE_KEEP_RAW_DATASET there); pass False to restore the
+    # delete-on-success behaviour.
+    keep_raw: bool = True
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
@@ -172,13 +179,16 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             exclude_bad: bool = False,
                             private: bool = False,
                             run_sync: bool = False,
-                            roles: list[str] | None = None) -> None:
+                            roles: list[str] | None = None,
+                            keep_raw: bool = True) -> None:
     """Run the pipeline synchronously in a background thread.
 
     exclude_fail: drop episodes with trajectory verdict FAIL.
     exclude_bad:  drop all BAD episodes.
     private:      create the LeRobot dataset repo as private.
     run_sync:     enable the debug-only sync diagnostics (off by default).
+    keep_raw:     leave the raw source dataset alone (the default — nothing
+                  auto-deletes a raw for now).
     All episodes appear in the returned quality data (including excluded ones)
     so the caller can display a full recap.
     """
@@ -303,11 +313,16 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
     except Exception as e:
         _rest_jobs[job_id].update(status="error", error=str(e), quality=quality_episodes)
     finally:
-        # Clean up the raw source ONLY on success. On failure keep it, so the
-        # run can be inspected and retried WITHOUT re-uploading from the devices
-        # (the upload is the slow part). `api` may be unset if we failed before
-        # it was built — the success gate avoids touching it in that case.
-        if _rest_jobs[job_id].get("status") == "done":
+        # The raw source is KEPT by default (keep_raw): re-uploading it from the
+        # devices is the slow part of any rebuild, and a build cancelled from the
+        # fleet must not leave a half-deleted source behind. Deleting it is now an
+        # explicit opt-in from the caller, and even then only on success — a failed
+        # run always keeps the raw so it can be inspected and retried.
+        # (`api` may be unset if we failed before building it; the gates below
+        # avoid touching it in that case.)
+        if keep_raw:
+            log(f"Kept raw dataset {source_repo} (raw datasets are not auto-deleted).")
+        elif _rest_jobs[job_id].get("status") == "done":
             try:
                 api.delete_repo(source_repo, repo_type="dataset")
                 log(f"Deleted raw dataset {source_repo}.")
@@ -329,7 +344,8 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
-                "private": req.private, "run_sync": req.run_sync, "roles": req.roles},
+                "private": req.private, "run_sync": req.run_sync, "roles": req.roles,
+                "keep_raw": req.keep_raw},
         daemon=True,
     )
     t.start()
