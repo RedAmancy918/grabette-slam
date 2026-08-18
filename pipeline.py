@@ -42,9 +42,13 @@ def _check_sync(episode_dir):
 
 
 def find_episode_dirs(root: Path) -> list[Path]:
-    """Every directory containing a raw OAK-D recording (oakd_left.mp4), anywhere
-    under root. Delegates to the package's single discovery helper."""
-    return find_episodes(root, anchor="oakd_left.mp4")
+    """Every directory under root holding a raw depth-camera recording
+    (dcam_left.mp4, or legacy oakd_left.mp4). Delegates to the package's single
+    discovery helper."""
+    # Use the default anchor: find_episodes searches the canonical dcam_ name AND
+    # its legacy oakd_ counterpart. Passing the legacy name explicitly would
+    # search ONLY that, making every new recording invisible here.
+    return find_episodes(root)
 
 
 def pair_episodes_by_role(arm_dirs) -> dict[str, dict[str, Path]]:
@@ -434,7 +438,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
     # (push_lerobot) scopes the token under a lock itself.
     episodes = find_episode_dirs(Path(dataset_dir))
     if not episodes:
-        raise ValueError(f"No episodes (oakd_left.mp4) found under {dataset_dir}")
+        raise ValueError(f"No episodes (dcam_left.mp4 or legacy oakd_left.mp4) found under {dataset_dir}")
     log(f"Found {len(episodes)} episode(s) : "
         f"{', '.join(episode_label(ep) for ep in episodes)}")
 

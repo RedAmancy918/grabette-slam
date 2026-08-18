@@ -2,11 +2,13 @@
 
 Converts trajectory + capture data into LeRobot v3 format (Parquet + MP4).
 Two camera observations: cam0 (RPi fisheye, raw_video.mp4) and cam1 (OAK left,
-oakd_left.mp4), both selected nearest-by-timestamp against the trajectory.
+dcam_left.mp4), both selected nearest-by-timestamp against the trajectory.
 """
 
 import json
 from pathlib import Path
+
+from grabette_postprocess.episode_files import resolve
 
 import av
 import cv2
@@ -96,10 +98,10 @@ def _load_video_timestamps(episode_dir: Path, video_path: Path) -> np.ndarray:
 
 
 def _load_oak_left_timestamps(episode_dir: Path) -> np.ndarray | None:
-    """Per-frame host_ms timestamps (seconds) for oakd_left.mp4 — the same clock
+    """Per-frame host_ms timestamps (seconds) for dcam_left.mp4 — the same clock
     the SLAM stamps the trajectory with (convert.py feeds host_ms), so nearest-ts
     matching against the trajectory is exact. None when missing/empty."""
-    ts_path = episode_dir / "oakd_left_timestamps.json"
+    ts_path = resolve(episode_dir, "dcam_left_timestamps.json")
     if not ts_path.is_file():
         return None
     with open(ts_path) as f:
@@ -250,7 +252,7 @@ def build_dataset(
                                                 set(cam0_indices.tolist()))
 
         # --- cam1: OAK left video, same nearest-by-timestamp selection ---
-        oak_path = ep_dir / "oakd_left.mp4"
+        oak_path = resolve(ep_dir, "dcam_left.mp4")
         oak_ts = _load_oak_left_timestamps(ep_dir)
         print(f"  OAK left video: {len(oak_ts)} frames, {oak_ts[-1]:.2f}s")
         cam1_indices = _nearest_frame_indices(traj_ts, oak_ts)
@@ -321,7 +323,7 @@ def _load_arm_streams(ep_dir: Path, image_size: tuple[int, int]) -> dict:
     traj_ts = df["timestamp"].values.astype(np.float64)
     cam1_ts = _load_oak_left_timestamps(ep_dir)
     if cam1_ts is None:
-        raise ValueError(f"no oakd_left timestamps in {ep_dir}")
+        raise ValueError(f"no depth-camera left timestamps in {ep_dir}")
     return {
         "dir": ep_dir,
         "traj_ts": traj_ts,
@@ -329,7 +331,7 @@ def _load_arm_streams(ep_dir: Path, image_size: tuple[int, int]) -> dict:
         "is_lost": df["is_lost"].astype(np.float32).values,     # (N,)
         "cam0_path": ep_dir / "raw_video.mp4",
         "cam0_ts": _load_video_timestamps(ep_dir, ep_dir / "raw_video.mp4"),
-        "cam1_path": ep_dir / "oakd_left.mp4",
+        "cam1_path": resolve(ep_dir, "dcam_left.mp4"),
         "cam1_ts": cam1_ts,
         "started": _load_capture_started(ep_dir),
     }
