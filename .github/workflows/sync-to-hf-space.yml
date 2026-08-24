@@ -1,0 +1,78 @@
+name: Sync main to HF prod Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Discard Space-side commits (they are lost for good)'
+        type: boolean
+        default: false
+
+env:
+  SPACE: pollen-robotics/grabette-slam
+
+concurrency:
+  group: hf-space-prod
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set in repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+
+          URL="https://pollen-robotics:${HF_TOKEN}@huggingface.co/spaces/${SPACE}"
+
+          # The Space repo is writable from the HF web UI, so it can hold
+          # commits GitHub has never seen — a README edit, a config change.
+          # Compare before pushing so those are never silently destroyed.
+          if git fetch --no-tags "$URL" main; then
+            if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              echo "Space is at or behind GitHub — fast-forward push."
+            elif [ "$FORCE" = "true" ]; then
+              AHEAD=$(git rev-list --count HEAD..FETCH_HEAD)
+              echo "::warning::Discarding $AHEAD Space-side commit(s) on explicit request."
+            else
+              AHEAD=$(git rev-list --count HEAD..FETCH_HEAD)
+              {
+                echo "### Sync refused — the Space has $AHEAD commit(s) GitHub does not have"
+                echo ""
+                echo "Edits made in the HF web UI live only in the Space repo."
+                echo "Port them to GitHub, then re-run. To discard them instead,"
+                echo "dispatch this workflow manually with **force** enabled."
+                echo ""
+                echo '```'
+                git log --oneline --no-decorate HEAD..FETCH_HEAD
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::The Space has $AHEAD commit(s) not on GitHub — see the job summary."
+              exit 1
+            fi
+          else
+            echo "::notice::No main branch to compare on the Space — treating this as a first push."
+          fi
+
+          if [ "$FORCE" = "true" ]; then
+            git push --force "$URL" HEAD:main
+          else
+            # No --force: git itself is the last line of defence if the Space
+            # moved between the fetch above and this push.
+            git push "$URL" HEAD:main
+          fi

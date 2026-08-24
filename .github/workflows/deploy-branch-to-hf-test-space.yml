@@ -1,0 +1,56 @@
+name: Deploy a branch to HF test Space
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or SHA to deploy'
+        required: true
+        default: 'main'
+
+env:
+  SPACE: pollen-robotics/grabette-slam-test
+
+concurrency:
+  group: hf-space-test
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set in repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+
+          URL="https://pollen-robotics:${HF_TOKEN}@huggingface.co/spaces/${SPACE}"
+
+          # Always --force: this Space is a scratch target, whatever ref was
+          # deployed last is meant to be replaced.
+          git push --force "$URL" HEAD:main
+
+      - name: Summary
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          {
+            echo "### Deployed to HF test Space"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Ref | \`$REF\` |"
+            echo "| Commit | \`$(git rev-parse --short HEAD)\` |"
+            echo "| Space | [$SPACE](https://huggingface.co/spaces/$SPACE) |"
+          } >> "$GITHUB_STEP_SUMMARY"
