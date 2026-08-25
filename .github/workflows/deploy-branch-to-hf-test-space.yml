@@ -4,9 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch, tag or SHA to deploy'
-        required: true
-        default: 'main'
+        # Leave EMPTY to deploy the branch picked in the "Use workflow from"
+        # dropdown — that dropdown only selects which branch this workflow FILE is
+        # read from, it is not what gets checked out, so a stale default here
+        # silently deployed the wrong ref. Fill it in only to deploy a tag or SHA.
+        description: 'Tag or SHA to deploy (leave empty to use the branch selected above)'
+        required: false
 
 env:
   SPACE: pollen-robotics/grabette-slam-test
@@ -22,7 +25,7 @@ jobs:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.ref_name }}
           fetch-depth: 0
           lfs: true
 
@@ -43,7 +46,7 @@ jobs:
 
       - name: Summary
         env:
-          REF: ${{ inputs.ref }}
+          REF: ${{ inputs.ref || github.ref_name }}
         run: |
           {
             echo "### Deployed to HF test Space"
