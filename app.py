@@ -5,8 +5,10 @@ source dataset and push the generated LeRobot dataset under their account.
 Gradio auto-injects the gr.OAuthToken parameter — it is NOT a UI input.
 
 This module is just the UI: it builds the Blocks layout and wires events. The
-rendering helpers live in views.py, the streaming run generators + cooperative
-flags in controller.py, and the episode-review state + reactive panel in review.py.
+rendering helpers live in views.py, the streaming run generators in controller.py,
+the episode-review panel in review.py, and every piece of run state in session.py —
+per browser session, so concurrent users never see each other's run or its flagged
+episodes.
 
 REST API (called by grabette devices):
   POST /api/process  {source_repo, target_repo, task}  Authorization: Bearer <hf_token>  → {job_id}
@@ -97,9 +99,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
                                  elem_id="logbox", visible=False)
 
-            # Episode review (reactive): a gr.Timer mirrors the worker's review
-            # flags into review_state, and review.build_panel draws one orange card
-            # per still-kept flagged episode. Not part of the streaming outputs.
+            # Episode review (reactive): a gr.Timer mirrors THIS session's worker
+            # review flags into review_state, and review.build_panel draws one orange
+            # card per still-kept flagged episode. Not part of the streaming outputs.
+            # gr.State is per-session and review.poll reads the caller's own
+            # session.RunSession, so a flagged episode never reaches another user.
             review_state = gr.State({"open": False, "kind": "trajectory",
                                      "items": [], "dropped": []})
             review_timer = gr.Timer(0.5)
@@ -131,7 +135,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     pause_btn.click(toggle_pause, inputs=None, outputs=None)
     cancel_btn.click(request_cancel, inputs=None, outputs=None)
     keep_btn.click(keep_running, inputs=None, outputs=None)
-    # Mirror the worker's review flags into review_state every tick; review.poll
+    # Mirror this session's review flags into review_state every tick; review.poll
     # returns gr.skip() when nothing changed, so the @gr.render block only redraws
     # on a real open/close or drop-set change (no churn while idle or running).
     review_timer.tick(review.poll, inputs=review_state, outputs=review_state)
