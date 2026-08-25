@@ -3,9 +3,11 @@ generators behind Run / Push-to-branch / Retry.
 
 The heavy work runs in a worker thread; its output (log() + every print()) streams
 through a queue back to the generator, which re-renders the page on each tick. Pure
-rendering lives in views.py; the episode-review state + panel live in review.py
-(imported here so the worker can publish flagged episodes and block for the user's
-decision).
+rendering lives in views.py; the episode-review panel lives in review.py.
+
+Nothing about a run is module-global: every flag lives on the caller's
+session.RunSession (resolved from the injected `gr.Request`), so two people using
+the Space at the same time never see — or control — each other's run.
 """
 
 import contextlib
@@ -20,53 +22,44 @@ import gradio as gr
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
 
-import review
+import session
 from pipeline import build_lerobot, episode_label, push_lerobot
 from views import bar, btns, error_card, inputs_view, io, run_recap, success_summary
 
-# Cooperative control flags, shared between the worker and the control buttons.
-# The Space processes one run at a time, so module-level flags are enough.
-#   _stop           — abandon the run (Cancel confirmed)
-#   _pause          — hold the worker at the next safe checkpoint (Pause)
-#   _cancel_pending — Cancel was clicked, awaiting confirmation
+# The cooperative control flags live on the caller's session (session.RunSession):
+#   stop           — abandon the run (Cancel confirmed)
+#   pause          — hold the worker at the next safe checkpoint (Pause)
+#   cancel_pending — Cancel was clicked, awaiting confirmation
 # The streaming generator is the ONLY writer of button state: it re-renders the
-# buttons from these flags on every tick. The handlers below just flip a flag
-# (outputs=None), so they never fight the generator for the same components.
-_stop = threading.Event()
-_pause = threading.Event()
-_cancel_pending = threading.Event()
+# buttons from its own session's flags on every tick. The handlers below just flip
+# a flag (outputs=None), so they never fight the generator for the same components.
+# `request: gr.Request` is injected by Gradio — it is NOT a UI input.
 
 
-def toggle_pause():
-    """Pause ⇄ Resume: flip the cooperative pause flag (button relabels itself on
+def toggle_pause(request: gr.Request = None):
+    """Pause ⇄ Resume: flip this session's pause flag (button relabels itself on
     the generator's next tick)."""
-    _pause.clear() if _pause.is_set() else _pause.set()
+    sess = session.get(request)
+    sess.pause.clear() if sess.pause.is_set() else sess.pause.set()
 
 
-def request_cancel():
+def request_cancel(request: gr.Request = None):
     """Cancel clicked: reveal the confirm/keep buttons (handled by the generator)."""
-    _cancel_pending.set()
+    session.get(request).cancel_pending.set()
 
 
-def keep_running():
+def keep_running(request: gr.Request = None):
     """'Keep running' clicked: dismiss the cancel confirmation."""
-    _cancel_pending.clear()
+    session.get(request).cancel_pending.clear()
 
 
-def confirm_cancel():
-    """Confirm-cancel handler: only signal the worker to abandon (outputs=None,
-    like the old Stop, so it preempts the running generator via cancels=). The
-    UI reset is done by reset() chained as .then() on this click — a single
-    function that both cancels= and writes outputs can't reliably apply its
+def confirm_cancel(request: gr.Request = None):
+    """Confirm-cancel handler: only signal this session's worker to abandon
+    (outputs=None, like the old Stop, so it preempts the running generator via
+    cancels=). The UI reset is done by reset() chained as .then() on this click — a
+    single function that both cancels= and writes outputs can't reliably apply its
     outputs (it'd queue behind the generator it's cancelling)."""
-    _stop.set()
-
-
-def _wait_if_paused():
-    """Block while paused (used as the worker's checkpoint gate). Returns at once
-    if a stop/cancel is requested, so pausing then cancelling never deadlocks."""
-    while _pause.is_set() and not _stop.is_set():
-        time.sleep(0.2)
+    session.get(request).stop.set()
 
 
 class _LineQueueWriter:
@@ -186,22 +179,22 @@ def _preflight(api, source_repo, target_repo, scopes=frozenset()):
     return exists, writable, None
 
 
-def _reset_view():
+def _reset_view(sess):
     """Full reset to the idle page (clears log/summary/bar, only Run shown).
 
-    Clears the UI-facing flags (pause, cancel-pending, review) but NOT _stop: when
+    Clears the UI-facing flags (pause, cancel-pending, review) but NOT stop: when
     this runs as the .then() after a confirmed Cancel, the background worker is still
-    winding down and relies on _stop staying set to abandon (skip the push). _run
-    clears _stop itself at the start of the next run.
+    winding down and relies on stop staying set to abandon (skip the push). _run
+    clears it itself at the start of the next run (sess.start_run()).
     """
-    _pause.clear()
-    _cancel_pending.clear()
-    review.reset()
+    sess.pause.clear()
+    sess.cancel_pending.clear()
+    sess.reset_review()
     return (*io("idle", bar(0, "ready"), ""), "", None, *btns("idle"),
             *inputs_view("idle"))
 
 
-def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
+def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch, sess):
     """Streaming generator behind Run / Push-to-branch. Yields the 16-element
     `outputs` tuple: bar, log, summary, retry_state, the 8 buttons, then the 4
     inputs-view fields. The episode-review panel is a separate reactive @gr.render
@@ -227,10 +220,7 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
     scopes = frozenset((getattr(oauth_token, "scope", "") or "").split())
     os.environ["HF_TOKEN"] = token
 
-    _stop.clear()
-    _pause.clear()
-    _cancel_pending.clear()  # fresh run
-    review.reset()
+    sess.start_run()  # fresh run: clear this session's flags
 
     logs: list[str] = []
     start = time.time()
@@ -241,13 +231,13 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         return "\n".join(logs)
 
     def view(summary="", *, state="running", branch=False, retry=False):
-        in_review = review._review.is_set()
+        in_review = sess.review.is_set()
         lbl = ("awaiting review" if in_review
-               else f"paused · {label}" if _pause.is_set()
+               else f"paused · {label}" if sess.pause.is_set()
                else f"{label} · {int(time.time() - start)}s")
         return (*io(state, bar(frac, lbl), render()), summary, retry_ctx,
-                *btns(state, paused=_pause.is_set(),
-                      cancel_pending=_cancel_pending.is_set(),
+                *btns(state, paused=sess.pause.is_set(),
+                      cancel_pending=sess.cancel_pending.is_set(),
                       branch=branch, retry=retry,
                       allow_pause=not in_review),
                 *inputs_view(state, source=source_repo, target=target_repo,
@@ -307,8 +297,10 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         q.put(("progress", f, lbl))
 
     def _review_gate(kind, items, all_eps):
-        """Publish `items` to the (kind="input"/"trajectory") review panel, block
-        the worker until Continue (or a cancel), then return the kept episode dirs.
+        """Publish `items` to THIS session's (kind="input"/"trajectory") review panel,
+        block the worker until Continue (or a cancel), then return the kept episode
+        dirs. Another user's panel never sees these episodes: they are published on
+        the session captured by this run, not on a module-level flag.
 
         all_eps is the full [(name, ep_dir), …] in order, where name is the
         episode's UNIQUE label (episode_label — in the fleet's role layout the dir
@@ -316,18 +308,18 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
         one card would drop that arm of every recording); the kept subset is the
         episodes the user did NOT remove (🗑). On cancel the full set is returned
         and the build then hits should_stop and raises — so nothing is pushed."""
-        review._review_kind[0] = kind
-        review._review_items[:] = items
-        review._review_drop.clear()
-        review._review_done.clear()
-        review._review.set()
-        while not review._review_done.is_set():
-            if _stop.is_set():
-                review._review.clear()
+        sess.review_kind = kind
+        sess.review_items[:] = items
+        sess.review_drop.clear()
+        sess.review_done.clear()
+        sess.review.set()
+        while not sess.review_done.is_set():
+            if sess.stop.is_set():
+                sess.review.clear()
                 return [ep for _, ep in all_eps]
             time.sleep(0.2)
-        review._review.clear()
-        drop = set(review._review_drop)
+        sess.review.clear()
+        drop = set(sess.review_drop)
         kept = [ep for name, ep in all_eps if name not in drop]
         if drop:
             print(f"Dropped {len(drop)} episode(s): {', '.join(sorted(drop))}.")
@@ -408,8 +400,8 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
                 # dataset that's one per recording (both arms), not one per arm.
                 built = build_lerobot(
                     raw, target_repo, task, root=ds_root,
-                    log=print, should_stop=_stop.is_set, to_branch=to_branch,
-                    on_progress=on_progress, token=token, gate=_wait_if_paused,
+                    log=print, should_stop=sess.stop.is_set, to_branch=to_branch,
+                    on_progress=on_progress, token=token, gate=sess.wait_if_paused,
                     pre_review=pre_review_cb, review=review_cb, run_sync=run_sync)
                 # Build done — dataset cached on disk; record it so that if the push
                 # fails, the "Retry push" button can reuse it (no re-running SLAM).
@@ -417,7 +409,7 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
                 n, link, mode = push_lerobot(
                     target_repo, task, ds_root, len(built),
                     to_branch=to_branch, token=token, log=print,
-                    on_progress=on_progress, gate=_wait_if_paused)
+                    on_progress=on_progress, gate=sess.wait_if_paused)
                 writer.flush()
             result["n"], result["link"], result["mode"] = n, link, mode
         except Exception as e:
@@ -472,7 +464,8 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch):
                state="finished")
 
 
-def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
+def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None,
+               request: gr.Request = None):
     """Retry just the push of an already-built dataset — no re-download, no SLAM.
     Reuses the on-disk dataset captured in retry_ctx by a previous failed run."""
     if oauth_token is None:
@@ -482,10 +475,8 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
     token = oauth_token.token
     os.environ["HF_TOKEN"] = token
 
-    _stop.clear()
-    _pause.clear()
-    _cancel_pending.clear()
-    review.reset()
+    sess = session.get(request)
+    sess.start_run()
 
     logs: list[str] = []
     start = time.time()
@@ -499,7 +490,7 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
         # is False; Cancel still works (abandons the retry).
         return (*io(state, bar(frac, f"{label} · {int(time.time() - start)}s"), render()),
                 summary, ctx,
-                *btns(state, cancel_pending=_cancel_pending.is_set(),
+                *btns(state, cancel_pending=sess.cancel_pending.is_set(),
                       retry=retry, allow_pause=False),
                 *inputs_view(state, target=retry_ctx["target_repo"],
                              task=retry_ctx["task"]))
@@ -565,16 +556,20 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None):
 
 
 def run_pipeline(source_repo, target_repo, task, run_sync=False,
-                 oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch=False)
+                 oauth_token: gr.OAuthToken | None = None,
+                 request: gr.Request = None):
+    yield from _run(source_repo, target_repo, task, run_sync, oauth_token,
+                    to_branch=False, sess=session.get(request))
 
 
 def run_pipeline_branch(source_repo, target_repo, task, run_sync=False,
-                        oauth_token: gr.OAuthToken | None = None):
-    yield from _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch=True)
+                        oauth_token: gr.OAuthToken | None = None,
+                        request: gr.Request = None):
+    yield from _run(source_repo, target_repo, task, run_sync, oauth_token,
+                    to_branch=True, sess=session.get(request))
 
 
-def reset():
+def reset(request: gr.Request = None):
     """Reset button (shown when finished): clear the page and return to idle
     (only Run). Inputs (source/target/task) are kept so the user can re-run."""
-    return _reset_view()
+    return _reset_view(session.get(request))
