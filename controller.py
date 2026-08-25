@@ -11,7 +11,6 @@ the Space at the same time never see — or control — each other's run.
 """
 
 import contextlib
-import os
 import queue
 import tempfile
 import threading
@@ -214,11 +213,16 @@ def _run(source_repo, target_repo, task, run_sync, oauth_token, to_branch, sess)
     if not (source_repo and target_repo and task):
         raise gr.Error("Fill in source repo, target repo and task.")
 
-    # OAuth access tokens aren't accepted by huggingface_hub.login() (it expects a
-    # classic token's role). Expose the token via env + pass it explicitly.
+    # The signed-in user's OAuth token stays a LOCAL variable, passed explicitly to
+    # every HF call below (HfApi / snapshot_download / build_lerobot / push_lerobot).
+    # It must never be written to os.environ: the process env is shared by every
+    # session and by the REST jobs, so a global HF_TOKEN would leave this user's
+    # credential as the process-wide default for everyone else's requests (and
+    # huggingface_hub.login() wouldn't take an OAuth token anyway — it expects a
+    # classic token's role). push_lerobot needs it in the env for LeRobot's
+    # push_to_hub, and scopes it there under a lock for that call only.
     token = oauth_token.token
     scopes = frozenset((getattr(oauth_token, "scope", "") or "").split())
-    os.environ["HF_TOKEN"] = token
 
     sess.start_run()  # fresh run: clear this session's flags
 
@@ -472,8 +476,7 @@ def retry_push(retry_ctx, oauth_token: gr.OAuthToken | None = None,
         raise gr.Error("Sign in with your Hugging Face account first.")
     if not retry_ctx:
         raise gr.Error("Nothing to retry — run the pipeline first.")
-    token = oauth_token.token
-    os.environ["HF_TOKEN"] = token
+    token = oauth_token.token  # local only — never os.environ, see _run
 
     sess = session.get(request)
     sess.start_run()
