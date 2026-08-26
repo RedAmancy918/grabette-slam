@@ -160,11 +160,18 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
 
 _rest_jobs: dict[str, dict] = {}  # job_id → {status, log, error, quality, target_repo, …}
 
-# A target repo whose NAME starts with this is a fleet SLAM check, not a dataset the
-# operator wants to keep: run the precheck + SLAM for the report, and push only if
-# something came out flagged (see check_only below). Kept in sync with
-# SLAM_CHECK_PREFIX in the grabette-fleet Space, which is what builds the name.
-SLAM_CHECK_PREFIX = "slamcheck-"
+# A target repo whose NAME carries one of these is a fleet trajectory check, not a
+# dataset the operator wants to keep: run the precheck + SLAM for the report, and
+# push only if something came out flagged (see check_only below). Kept in sync with
+# the grabette-fleet Space, which is what builds the name.
+#
+# Two of them, and both stay: the fleet names a check "{task}_trajectorycheck_{stamp}"
+# now and "slamcheck-…" before, so a fleet that hasn't been redeployed yet is still
+# sending the old one — accepting both is what lets the two Spaces be deployed in
+# either order. The marker is delimited by underscores rather than matched bare, so
+# an ordinary dataset that merely mentions a trajectory check isn't mistaken for one.
+SLAM_CHECK_MARKER = "_trajectorycheck_"
+SLAM_CHECK_PREFIX = "slamcheck-"   # legacy, still honoured
 
 
 class _ProcessReq(BaseModel):
@@ -190,7 +197,7 @@ class _ProcessReq(BaseModel):
     # dataset only if at least one episode is flagged (verdict != GOOD) — a clean
     # check leaves nothing on the Hub. Callers that cannot send this flag (the
     # device relay rebuilds the payload from fixed keys) get the same behaviour by
-    # naming the target repo with SLAM_CHECK_PREFIX.
+    # naming the target repo with SLAM_CHECK_MARKER (or the legacy prefix).
     check_only: bool = False
 
 
@@ -410,7 +417,9 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
     # set of keys, so a new flag would only arrive once every Pi is redeployed —
     # whereas the name is chosen by the fleet, travels today, and reads clearly on
     # the Hub. check_only stays the explicit path for callers that can send it.
-    check_only = req.check_only or target_repo.split("/")[-1].startswith(SLAM_CHECK_PREFIX)
+    name = target_repo.split("/")[-1]
+    check_only = (req.check_only or SLAM_CHECK_MARKER in name
+                  or name.startswith(SLAM_CHECK_PREFIX))
     _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None,
                           "quality": None, "flagged": None, "visualizer": None,
                           # What /api/quality looks up: the caller behind the device
