@@ -229,10 +229,17 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
         _rest_jobs[job_id]["log"] = "\n".join(logs)
 
     def flagged() -> list[str]:
-        """The episodes this run does NOT consider clean — anything whose verdict
-        is not GOOD: a pre-check error or warning, a SLAM failure, or a BAD/FAIL
-        trajectory (which is what "the take lost tracking" looks like here)."""
-        return [q["name"] for q in quality_episodes if q.get("verdict") != "GOOD"]
+        """The episodes whose SLAM outcome is not clean: a BAD/FAIL trajectory
+        (what "the take lost tracking" looks like here), a SLAM failure, or a
+        pre-check ERROR that stopped the take from being run at all.
+
+        A pre-check WARNING is deliberately NOT one. It is still reported — the
+        caller shows it against the episode — but it says nothing about tracking,
+        and "the gripper barely moved in this take" would otherwise push a dataset
+        on nearly every check, which teaches the operator to ignore the result."""
+        return [q["name"] for q in quality_episodes
+                if q.get("verdict") != "GOOD"
+                and not (q.get("kind") == "pre_check" and q.get("verdict") == "WARN")]
 
     result_link: str | None = None
     try:
