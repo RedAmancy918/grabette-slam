@@ -13,6 +13,11 @@ episodes.
 REST API (called by grabette devices):
   POST /api/process  {source_repo, target_repo, task}  Authorization: Bearer <hf_token>  → {job_id}
   GET  /api/status/{job_id}                                      → {status, log, error}
+  GET  /api/quality/{target_repo}   (no auth, like /api/status)   → {status, quality, flagged, …}
+
+A "SLAM check" is the same pipeline run with check_only: it reports per-episode
+tracking quality and pushes a dataset ONLY when an episode is flagged, so the
+operator can look at the bad take in the LeRobot visualizer.
 """
 
 import contextlib
@@ -28,7 +33,7 @@ from huggingface_hub import HfApi, snapshot_download
 from pydantic import BaseModel
 
 import review
-from views import CSS, THEME, bar
+from views import CSS, THEME, bar, visualizer_url
 from controller import (
     confirm_cancel,
     keep_running,
@@ -153,7 +158,20 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
 # Headless pipeline calls: grabette uploads a raw dataset then POSTs here.
 # No review callbacks — unattended run, bad episodes are skipped automatically.
 
-_rest_jobs: dict[str, dict] = {}  # job_id → {status, log, error}
+_rest_jobs: dict[str, dict] = {}  # job_id → {status, log, error, quality, target_repo, …}
+
+# A target repo whose NAME carries one of these is a fleet trajectory check, not a
+# dataset the operator wants to keep: run the precheck + SLAM for the report, and
+# push only if something came out flagged (see check_only below). Kept in sync with
+# the grabette-fleet Space, which is what builds the name.
+#
+# Two of them, and both stay: the fleet names a check "{task}_trajectorycheck_{stamp}"
+# now and "slamcheck-…" before, so a fleet that hasn't been redeployed yet is still
+# sending the old one — accepting both is what lets the two Spaces be deployed in
+# either order. The marker is delimited by underscores rather than matched bare, so
+# an ordinary dataset that merely mentions a trajectory check isn't mistaken for one.
+SLAM_CHECK_MARKER = "_trajectorycheck_"
+SLAM_CHECK_PREFIX = "slamcheck-"   # legacy, still honoured
 
 
 class _ProcessReq(BaseModel):
@@ -175,6 +193,12 @@ class _ProcessReq(BaseModel):
     # explicitly (see GRABETTE_KEEP_RAW_DATASET there); pass False to restore the
     # delete-on-success behaviour.
     keep_raw: bool = True
+    # SLAM check: run the precheck + SLAM to REPORT quality, and build/push the
+    # dataset only if at least one episode is flagged (verdict != GOOD) — a clean
+    # check leaves nothing on the Hub. Sent by the fleet and forwarded by the device
+    # relay; a caller too old to send it still gets the same behaviour by naming the
+    # target repo with SLAM_CHECK_MARKER (or the legacy prefix).
+    check_only: bool = False
 
 
 def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
@@ -184,7 +208,8 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                             private: bool = False,
                             run_sync: bool = False,
                             roles: list[str] | None = None,
-                            keep_raw: bool = True) -> None:
+                            keep_raw: bool = True,
+                            check_only: bool = False) -> None:
     """Run the pipeline synchronously in a background thread.
 
     exclude_fail: drop episodes with trajectory verdict FAIL.
@@ -193,15 +218,35 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
     run_sync:     enable the debug-only sync diagnostics (off by default).
     keep_raw:     leave the raw source dataset alone (the default — nothing
                   auto-deletes a raw for now).
+    check_only:   SLAM check — report quality, and push the dataset only if an
+                  episode is flagged (see the push decision below).
     All episodes appear in the returned quality data (including excluded ones)
     so the caller can display a full recap.
     """
     logs: list[str] = []
     quality_episodes: list[dict] = []
+    # Publish the (still growing) per-episode list on the job record right away:
+    # it is the SAME list object, so /api/status and /api/quality expose verdicts
+    # as SLAM works through the set instead of only once the run ends. That live
+    # view is what lets a caller fill a report table episode by episode.
+    _rest_jobs[job_id]["quality"] = quality_episodes
 
     def log(msg: str) -> None:
         logs.append(msg)
         _rest_jobs[job_id]["log"] = "\n".join(logs)
+
+    def flagged() -> list[str]:
+        """The episodes whose SLAM outcome is not clean: a BAD/FAIL trajectory
+        (what "the take lost tracking" looks like here), a SLAM failure, or a
+        pre-check ERROR that stopped the take from being run at all.
+
+        A pre-check WARNING is deliberately NOT one. It is still reported — the
+        caller shows it against the episode — but it says nothing about tracking,
+        and "the gripper barely moved in this take" would otherwise push a dataset
+        on nearly every check, which teaches the operator to ignore the result."""
+        return [q["name"] for q in quality_episodes
+                if q.get("verdict") != "GOOD"
+                and not (q.get("kind") == "pre_check" and q.get("verdict") == "WARN")]
 
     result_link: str | None = None
     try:
@@ -284,6 +329,12 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                         "name": episode_label(ep), "kind": "trajectory",
                         "verdict": report.verdict,
                         "tracking_pct": round(report.tracking_pct, 1),
+                        # Frame counts, not just the percentage: "3 lost frames out
+                        # of 900" and "90 out of 900" both round to a reassuring
+                        # tracking_pct, and only the raw count says which is which.
+                        "n_frames": report.n_frames,
+                        "n_tracked": report.n_tracked,
+                        "n_lost": report.n_lost,
                         "n_jumps": report.n_jumps,
                         "total_distance_m": round(report.total_distance_m, 2),
                         "errors": list(report.errors),
@@ -291,9 +342,22 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
                         "excluded": excluded,
                     })
 
-                if not kept:
+                bad = flagged()
+                if check_only and not bad:
+                    # A clean SLAM check leaves nothing behind: the answer IS the
+                    # report ("nobody lost tracking, keep recording the same way"),
+                    # and a dataset nobody asked for would just pile up on the Hub.
+                    log(f"✅ SLAM check: {len(kept)} episode(s), none lost tracking "
+                        "— nothing pushed.")
+                elif not kept:
                     log("⚠ No episode produced an acceptable trajectory — dataset not pushed.")
                 else:
+                    if check_only:
+                        # Flagged → push the WHOLE tested set, not just the culprits,
+                        # so the bad take can be compared in the LeRobot visualizer
+                        # against the ones that came out fine.
+                        log(f"SLAM check flagged {len(bad)} episode(s) ({', '.join(bad)}) "
+                            f"— pushing the {len(kept)} tested episode(s) for inspection.")
                     # Same builder as the UI run: `roles` (given by the fleet, raw
                     # uploaded to {episode_id}/{role}) selects the uniform
                     # role-prefixed schema for any arm count; when absent it is
@@ -313,9 +377,14 @@ def _run_pipeline_headless(job_id: str, source_repo: str, target_repo: str,
             status="done",
             result=result_link,
             quality=quality_episodes,
+            flagged=flagged(),
+            # The LeRobot visualizer can only open a PUBLIC dataset, so a private
+            # push gets no visualizer link rather than one that dead-ends.
+            visualizer=visualizer_url(target_repo) if (result_link and not private) else None,
         )
     except Exception as e:
-        _rest_jobs[job_id].update(status="error", error=str(e), quality=quality_episodes)
+        _rest_jobs[job_id].update(status="error", error=str(e), quality=quality_episodes,
+                                  flagged=flagged())
     finally:
         # The raw source is KEPT by default (keep_raw): re-uploading it from the
         # devices is the slow part of any rebuild, and a build cancelled from the
@@ -342,14 +411,27 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
         raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <hf_token>")
     token = authorization[len("Bearer "):].strip()
     job_id = uuid.uuid4().hex[:12]
-    _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None, "quality": None}
+    target_repo = req.target_repo.strip()
+    # check_only is the explicit path, and the fleet now sends it: the device relay
+    # forwards it from the fleet's process_dataset command. The target repo NAME is
+    # kept as a fallback because it still arrives from any Pi running a build older
+    # than that change — and unlike the flag, the name travels without a redeploy.
+    # Drop the name-matching once no such device is in the field.
+    name = target_repo.split("/")[-1]
+    check_only = (req.check_only or SLAM_CHECK_MARKER in name
+                  or name.startswith(SLAM_CHECK_PREFIX))
+    _rest_jobs[job_id] = {"status": "running", "log": "", "error": None, "result": None,
+                          "quality": None, "flagged": None, "visualizer": None,
+                          # What /api/quality looks up: the caller behind the device
+                          # knows the repo it asked for, never this job's id.
+                          "target_repo": target_repo, "check_only": check_only}
     t = threading.Thread(
         target=_run_pipeline_headless,
-        args=(job_id, req.source_repo.strip(), req.target_repo.strip(),
+        args=(job_id, req.source_repo.strip(), target_repo,
               req.task.strip(), token),
         kwargs={"exclude_fail": req.exclude_fail, "exclude_bad": req.exclude_bad,
                 "private": req.private, "run_sync": req.run_sync, "roles": req.roles,
-                "keep_raw": req.keep_raw},
+                "keep_raw": req.keep_raw, "check_only": check_only},
         daemon=True,
     )
     t.start()
@@ -362,6 +444,37 @@ async def api_status(job_id: str):
     if job is None:
         return {"status": "not_found"}
     return job
+
+
+@fastapi_app.get("/api/quality/{repo_id:path}")
+async def api_quality(repo_id: str):
+    """The latest run for a TARGET REPO, addressed by repo id instead of job id.
+
+    Same in-memory record as /api/status (so the same unauthenticated exposure),
+    but reachable by a caller that never learns the job id: the fleet has a DEVICE
+    trigger the conversion, and the device reports back only the result. This is
+    how a per-episode report reaches the fleet dashboard with no HF token in it and
+    nothing to redeploy on the devices. `quality` is published live, so polling
+    this streams verdicts as SLAM works through the set.
+    """
+    repo = repo_id.strip("/")
+    match = None
+    for job in _rest_jobs.values():  # insertion-ordered → the last match is the newest
+        if job.get("target_repo") == repo:
+            match = job
+    if match is None:
+        # Also the honest answer after a restart: the job list lives in memory only.
+        return {"status": "not_found", "target_repo": repo}
+    log = match.get("log") or ""
+    return {"status": match["status"], "target_repo": repo,
+            "check_only": match.get("check_only", False),
+            "quality": match.get("quality") or [],
+            "flagged": match.get("flagged"),
+            "result": match.get("result"), "visualizer": match.get("visualizer"),
+            "error": match.get("error"),
+            # Last log line only: enough to show what the run is doing without
+            # shipping the whole (long) log on every poll.
+            "log_tail": log.rstrip().split("\n")[-1] if log.strip() else ""}
 
 
 # Mount Gradio onto the FastAPI app. queue() is required for streaming generators
