@@ -195,9 +195,9 @@ class _ProcessReq(BaseModel):
     keep_raw: bool = True
     # SLAM check: run the precheck + SLAM to REPORT quality, and build/push the
     # dataset only if at least one episode is flagged (verdict != GOOD) — a clean
-    # check leaves nothing on the Hub. Callers that cannot send this flag (the
-    # device relay rebuilds the payload from fixed keys) get the same behaviour by
-    # naming the target repo with SLAM_CHECK_MARKER (or the legacy prefix).
+    # check leaves nothing on the Hub. Sent by the fleet and forwarded by the device
+    # relay; a caller too old to send it still gets the same behaviour by naming the
+    # target repo with SLAM_CHECK_MARKER (or the legacy prefix).
     check_only: bool = False
 
 
@@ -412,11 +412,11 @@ async def api_process(req: _ProcessReq, authorization: str | None = Header(defau
     token = authorization[len("Bearer "):].strip()
     job_id = uuid.uuid4().hex[:12]
     target_repo = req.target_repo.strip()
-    # A fleet SLAM check announces itself by the target repo NAME. It cannot use
-    # check_only: the relay client on the device rebuilds this payload from a fixed
-    # set of keys, so a new flag would only arrive once every Pi is redeployed —
-    # whereas the name is chosen by the fleet, travels today, and reads clearly on
-    # the Hub. check_only stays the explicit path for callers that can send it.
+    # check_only is the explicit path, and the fleet now sends it: the device relay
+    # forwards it from the fleet's process_dataset command. The target repo NAME is
+    # kept as a fallback because it still arrives from any Pi running a build older
+    # than that change — and unlike the flag, the name travels without a redeploy.
+    # Drop the name-matching once no such device is in the field.
     name = target_repo.split("/")[-1]
     check_only = (req.check_only or SLAM_CHECK_MARKER in name
                   or name.startswith(SLAM_CHECK_PREFIX))
