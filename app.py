@@ -56,19 +56,26 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
     )
-    with gr.Row():
-        # ---- Inputs (left) ----
-        with gr.Column(scale=2, min_width=280):
-            gr.LoginButton(size="sm")
-            # ---- Community contributions (step 1, folded away) ----
-            # A community dataset holds only manifests; its recordings live in each
-            # contributor's own raw dataset. This gathers them into ONE raw dataset
-            # that the conversion below can read. Collapsed by default: most runs
-            # convert a dataset recorded by one person and never open this.
-            with gr.Accordion("Community contributions", open=False):
+    # Sign-in gates every action on the page (both panels below), so it belongs
+    # above them rather than inside the conversion form's column.
+    gr.LoginButton(size="sm")
+
+    # ---- Community contributions (step 1, folded away) ----------------------
+    # A community dataset holds only manifests; its recordings live in each
+    # contributor's own raw dataset. This gathers them into ONE raw dataset that
+    # the conversion form below can read. Collapsed by default: most runs convert
+    # a dataset recorded by one person and never open this.
+    #
+    # OUTSIDE the two-column Row on purpose. Inside it, opening the accordion
+    # widened the inputs column past its share and the Row wrapped — the whole
+    # form jumped to a single left-aligned stack. A full-width band of its own
+    # also reads better: step 1 spans the page, step 2's form sits under it.
+    with gr.Accordion("Community contributions", open=False):
+        with gr.Row():
+            with gr.Column(scale=2, min_width=280):
                 gr.Markdown(
                     "Gather the episodes contributed to a community dataset into one "
-                    "raw dataset, then convert it below.",
+                    "raw dataset, then convert it with the form below.",
                     elem_classes=["gather-note"])
                 community_repo = gr.Textbox(
                     label="Community dataset", info="the repo holding contrib/",
@@ -86,9 +93,14 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                     label="Dry run", value=False,
                     info="say what would be gathered, copy nothing")
                 gather_btn = gr.Button("⇩  Gather contributions", variant="secondary")
+            with gr.Column(scale=3, min_width=280):
                 gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
                                         autoscroll=True, visible=False)
                 gather_summary = gr.Markdown(line_breaks=True)
+
+    with gr.Row():
+        # ---- Inputs (left) ----
+        with gr.Column(scale=2, min_width=280):
             source = gr.Textbox(label="Source dataset", info="raw Grabette repo on the Hub",
                                 placeholder="pollen-robotics/grabette-raw")
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
