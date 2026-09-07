@@ -44,6 +44,37 @@ jobs:
           # deployed last is meant to be replaced.
           git push --force "$URL" HEAD:main
 
+      # Which branch is on the test Space, answered on the Space's own page: the
+      # ref is written as a Space VARIABLE, which HF injects into the container as
+      # an env var the app reads (GRABETTE_DEPLOYED_REF in app.py). No stamp file
+      # is committed, so the deployed tree stays byte-identical to the branch and
+      # the Dockerfile needs no COPY for a file that only exists here.
+      # AFTER the push: a deploy that failed must not advertise itself as live.
+      # Writing a variable restarts the Space, which the push has queued anyway.
+      - name: Stamp the deployed ref on the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          python3 -m pip install --quiet "huggingface_hub>=0.25"
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          sha = subprocess.check_output(
+              ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+          for key, value in (("GRABETTE_DEPLOYED_REF", os.environ["REF"]),
+                             ("GRABETTE_DEPLOYED_SHA", sha)):
+              api.add_space_variable(
+                  repo_id=os.environ["SPACE"], key=key, value=value,
+                  description="Set by the deploy-branch workflow — shown in the app's TEST banner.",
+              )
+              print(f"{key}={value}")
+          PY
+
       - name: Summary
         env:
           REF: ${{ inputs.ref || github.ref_name }}
@@ -56,4 +87,7 @@ jobs:
             echo "| Ref | \`$REF\` |"
             echo "| Commit | \`$(git rev-parse --short HEAD)\` |"
             echo "| Space | [$SPACE](https://huggingface.co/spaces/$SPACE) |"
+            echo ""
+            echo "The Space's TEST banner now names this ref (stamped as the Space"
+            echo "variables \`GRABETTE_DEPLOYED_REF\` / \`GRABETTE_DEPLOYED_SHA\`)."
           } >> "$GITHUB_STEP_SUMMARY"
