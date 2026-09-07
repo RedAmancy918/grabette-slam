@@ -286,6 +286,11 @@ CSS = """
 #app-header p {color: var(--body-text-color-subdued); margin: 2px 0 0; font-size: .9rem;}
 #logbox textarea {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                   font-size: 12px; line-height: 1.35;}
+/* The note at the top of the folded "Community contributions" panel: present
+   enough to say what the panel is for, dim enough not to compete with the
+   conversion form, which is what most runs use. */
+.gather-note p {color: var(--body-text-color-subdued); font-size: .85rem;
+                margin: 0 0 6px;}
 footer {display: none !important;}
 /* Episode-review actions: orange to match the flagged-episode cards (warning),
    not the default emerald primary.

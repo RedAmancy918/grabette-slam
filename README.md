@@ -29,6 +29,33 @@ A HuggingFace Space that turns a raw Grabette recording dataset into a
    [LeRobot visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
    is shown for the result (the dataset must be public to be visualized).
 
+## Community contributions (folded panel, above the form)
+
+A **community dataset** holds no recordings: each accepted episode is one small
+JSON under `contrib/<contributor>/` pointing at a recording that lives in the
+contributor's own raw dataset. See
+[the fleet's docs](https://huggingface.co/spaces/pollen-robotics/grabette-fleet/blob/main/docs/community-datasets.md)
+for why it is shaped that way.
+
+Building a LeRobot dataset from one is therefore two steps, and this Space now
+does both:
+
+1. **Gather** — give it the community dataset and a raw dataset of your own. It
+   reads every merged manifest, fetches the episodes from each contributor's repo
+   and copies them in under `{episode_id}__{contributor}/{role}/`. Re-runnable:
+   an episode already gathered is skipped, so merging one more pull request means
+   gathering again, not rebuilding. Tick **Dry run** to see the plan first, and
+   set **Required devices** so a contribution short of an arm is left out and
+   named rather than half-copied.
+2. **Run** — the usual conversion. On success the gather fills in **Source
+   dataset** for you, so step 2 is one click away.
+
+It runs here rather than on a laptop for a plain reason: both ends are on the
+Hub, so gathering from home would pull every episode down a domestic link and
+push it straight back up. The same logic is available as a CLI
+(`scripts/pipeline/collect_community_contributions.py` in `grabette-postprocess`)
+for a one-off from a machine with a fat pipe.
+
 ## Why a Docker Space
 
 The SLAM step is a compiled C++ binary (`offline_vslam`, built on RTAB-Map).

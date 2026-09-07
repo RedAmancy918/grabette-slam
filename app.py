@@ -33,6 +33,7 @@ from huggingface_hub import HfApi, snapshot_download
 from pydantic import BaseModel
 
 import review
+from gather import run_gather
 from views import CSS, THEME, bar, visualizer_url
 from controller import (
     confirm_cancel,
@@ -59,6 +60,35 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         # ---- Inputs (left) ----
         with gr.Column(scale=2, min_width=280):
             gr.LoginButton(size="sm")
+            # ---- Community contributions (step 1, folded away) ----
+            # A community dataset holds only manifests; its recordings live in each
+            # contributor's own raw dataset. This gathers them into ONE raw dataset
+            # that the conversion below can read. Collapsed by default: most runs
+            # convert a dataset recorded by one person and never open this.
+            with gr.Accordion("Community contributions", open=False):
+                gr.Markdown(
+                    "Gather the episodes contributed to a community dataset into one "
+                    "raw dataset, then convert it below.",
+                    elem_classes=["gather-note"])
+                community_repo = gr.Textbox(
+                    label="Community dataset", info="the repo holding contrib/",
+                    placeholder="pollen-robotics/grabette-community-fold-a-towel")
+                gather_target = gr.Textbox(
+                    label="Raw dataset to write", info="yours; created if needed",
+                    placeholder="pollen-robotics/fold-a-towel-raw")
+                # The task's required devices. A contribution short of one is left
+                # out and named rather than half-copied: the converter drops a
+                # recording missing an arm anyway.
+                gather_roles = gr.CheckboxGroup(
+                    ["left", "right", "casquette"], label="Required devices",
+                    info="leave empty to gather every contribution")
+                gather_dry = gr.Checkbox(
+                    label="Dry run", value=False,
+                    info="say what would be gathered, copy nothing")
+                gather_btn = gr.Button("⇩  Gather contributions", variant="secondary")
+                gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
+                                        autoscroll=True, visible=False)
+                gather_summary = gr.Markdown(line_breaks=True)
             source = gr.Textbox(label="Source dataset", info="raw Grabette repo on the Hub",
                                 placeholder="pollen-robotics/grabette-raw")
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
@@ -127,6 +157,12 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                confirm_branch_btn, retry_btn,
                run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn,
                source, target, task, selection_card]
+    # Gathering writes `source` on success, so step 2 is one click away. It never
+    # writes any other component the run generator owns, so the two cannot fight
+    # over the same output.
+    gather_btn.click(run_gather,
+                     inputs=[community_repo, gather_target, gather_roles, gather_dry],
+                     outputs=[gather_log, gather_summary, gather_btn, source])
     run_event = run_btn.click(run_pipeline, inputs=[source, target, task, debug_sync],
                               outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
