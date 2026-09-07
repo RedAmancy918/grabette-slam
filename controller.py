@@ -572,6 +572,23 @@ def run_pipeline_branch(source_repo, target_repo, task, run_sync=False,
                     to_branch=True, sess=session.get(request))
 
 
+def run_pipeline_chained(chain, source_repo, target_repo, task, run_sync=False,
+                         oauth_token: gr.OAuthToken | None = None,
+                         request: gr.Request = None):
+    """The conversion half of a gather-and-convert, chained after the gathering.
+
+    Gradio has no conditional `.then()`, so the condition lives here: `chain` is
+    the flag the gathering set, True only when a real (non-dry) gather succeeded
+    AND the user asked for the conversion. Anything else and this writes nothing
+    at all — the gather panel has already said what happened, and overwriting the
+    run panel with a spurious error would bury it.
+    """
+    if not chain:
+        return
+    yield from _run(source_repo, target_repo, task, run_sync, oauth_token,
+                    to_branch=False, sess=session.get(request))
+
+
 def reset(request: gr.Request = None):
     """Reset button (shown when finished): clear the page and return to idle
     (only Run). Inputs (source/target/task) are kept so the user can re-run."""

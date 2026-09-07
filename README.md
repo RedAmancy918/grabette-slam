@@ -37,18 +37,26 @@ contributor's own raw dataset. See
 [the fleet's docs](https://huggingface.co/spaces/pollen-robotics/grabette-fleet/blob/main/docs/community-datasets.md)
 for why it is shaped that way.
 
-Building a LeRobot dataset from one is therefore two steps, and this Space now
-does both:
+Building a LeRobot dataset from one is therefore two steps, and this Space does
+both — separately, or on one click.
 
 1. **Gather** — give it the community dataset and a raw dataset of your own. It
    reads every merged manifest, fetches the episodes from each contributor's repo
-   and copies them in under `{episode_id}__{contributor}/{role}/`. Re-runnable:
-   an episode already gathered is skipped, so merging one more pull request means
-   gathering again, not rebuilding. Tick **Dry run** to see the plan first, and
-   set **Required devices** so a contribution short of an arm is left out and
-   named rather than half-copied.
-2. **Run** — the usual conversion. On success the gather fills in **Source
-   dataset** for you, so step 2 is one click away.
+   and copies them in under `{episode_id}__{contributor}/{role}/`. It produces a
+   **raw** dataset, not a LeRobot one. Re-runnable: an episode already gathered is
+   skipped, so merging one more pull request means gathering again, not
+   rebuilding. Tick **Dry run** to see the plan first, and set **Required
+   devices** so a contribution short of an arm is left out and named rather than
+   half-copied.
+2. **Convert** — the usual run. The gather fills in **Source dataset** for you,
+   so it is one click away.
+
+Ticking **…and convert to a LeRobot dataset straight after** does both from the
+gather button: the conversion starts on the raw dataset just written, with the
+Target dataset and Task description from the form below. Those two are validated
+*before* any copying, since discovering an empty target after fetching every
+episode is the worst possible ordering. A dry run never chains, and neither does
+a failed gather.
 
 It runs here rather than on a laptop for a plain reason: both ends are on the
 Hub, so gathering from home would pull every episode down a domestic link and
