@@ -33,7 +33,14 @@ from huggingface_hub import HfApi, snapshot_download
 from pydantic import BaseModel
 
 import review
-from gather import run_gather
+from gather import (
+    chain_toggled,
+    dry_toggled,
+    gather_before_run,
+    gather_ready,
+    mirror_source,
+    run_gather,
+)
 from views import CSS, THEME, bar, visualizer_url
 from controller import (
     confirm_cancel,
@@ -41,7 +48,6 @@ from controller import (
     request_cancel,
     reset,
     retry_push,
-    run_pipeline,
     run_pipeline_branch,
     run_pipeline_chained,
     toggle_pause,
@@ -71,47 +77,62 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     # widened the inputs column past its share and the Row wrapped — the whole
     # form jumped to a single left-aligned stack. A full-width band of its own
     # also reads better: step 1 spans the page, step 2's form sits under it.
-    # A single vertical stack, deliberately: no inner Row, no columns, nothing
-    # whose width can change. Opening the panel then only ever adds HEIGHT — the
-    # page's width is settled by the conversion form below and stays put. The
-    # first version put this inside that form's Row, where opening it widened a
-    # column and made the Row wrap; the second gave it columns of its own, which
-    # still moved things sideways. This one cannot.
-    with gr.Accordion("Gather community contributions into a raw dataset (optional)",
+    # Same two-column split as the conversion form below (scale 2 / 3), so the
+    # two panels line up: inputs on the left at the same width, log and result on
+    # the right. This only became safe once `.gradio-container` got an explicit
+    # width — it used to size to its content, so opening this panel snapped the
+    # whole page from ~549px to the 1080px cap, which looked like the panel
+    # widening itself. See the CSS note in views.py.
+    with gr.Accordion("Gather community contributions (optional)",
                       open=False):
-        gr.Markdown(
-            "Only for a **community** dataset, whose episodes live in each "
-            "contributor's own repo. This copies them into one raw dataset.\n\n"
-            "It produces a **raw** dataset, not a LeRobot one. Either convert it "
-            "afterwards with the form below (its Source field is filled in for "
-            "you), or tick *and convert* here to do both in one go.",
-            elem_classes=["gather-note"])
-        community_repo = gr.Textbox(
-            label="Community dataset", info="the repo holding contrib/",
-            placeholder="pollen-robotics/grabette-community-fold-a-towel")
-        gather_target = gr.Textbox(
-            label="Raw dataset to write", info="yours; created if needed",
-            placeholder="pollen-robotics/fold-a-towel-raw")
-        # The task's required devices. A contribution short of one is left out and
-        # named rather than half-copied: the converter drops a recording missing an
-        # arm anyway.
-        gather_roles = gr.CheckboxGroup(
-            ["left", "right", "casquette"], label="Required devices",
-            info="leave empty to gather every contribution")
-        # One click for both steps. The conversion then reads the raw dataset just
-        # written, with the Target dataset and Task description from the form
-        # below — which is why they are validated BEFORE any copying starts.
-        gather_chain = gr.Checkbox(
-            label="…and convert to a LeRobot dataset straight after", value=False,
-            info="uses the raw dataset above as the source, with the target and "
-                 "task from the form below")
-        gather_dry = gr.Checkbox(
-            label="Dry run", value=False,
-            info="say what would be gathered, copy nothing")
-        gather_btn = gr.Button("⇩  Gather into a raw dataset", variant="secondary")
-        gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
-                                autoscroll=True, visible=False)
-        gather_summary = gr.Markdown(line_breaks=True)
+        with gr.Row():
+            with gr.Column(scale=2, min_width=280):
+                gr.Markdown(
+                    "Only for a **community** dataset, whose episodes live in each "
+                    "contributor's own repo. This copies them into one raw dataset."
+                    "\n\nIt produces a **raw** dataset, not a LeRobot one. Either "
+                    "convert it afterwards with the form below (its Source field is "
+                    "filled in for you), or tick *and convert* here to do both in "
+                    "one go.",
+                    elem_classes=["gather-note"])
+                community_repo = gr.Textbox(
+                    label="Community dataset", info="the repo holding contrib/",
+                    placeholder="pollen-robotics/grabette-community-…")
+                # Right under the source it previews, and above everything it
+                # makes irrelevant: a dry run writes nothing, so it needs no
+                # target, no device filter and no conversion.
+                gather_dry = gr.Checkbox(
+                    label="Dry run", value=False,
+                    info="say what would be gathered, copy nothing")
+                gather_target = gr.Textbox(
+                    label="Raw dataset to write", info="yours; created if needed",
+                    placeholder="pollen-robotics/fold-a-towel-raw")
+                # The task's required devices. A contribution short of one is left
+                # out and named rather than half-copied: the converter drops a
+                # recording missing an arm anyway.
+                gather_roles = gr.CheckboxGroup(
+                    ["left", "right", "casquette"], label="Required devices",
+                    info="leave empty to gather every contribution")
+                # One click for both steps. The conversion then reads the raw
+                # dataset just written, with the Target dataset and Task
+                # description from the form below — which is why those two are
+                # validated BEFORE any copying starts.
+                # Ticking this hands the action to Run below: it then gathers
+                # first and converts what it gathered, which is why this locks
+                # Dry run and the Gather button.
+                gather_chain = gr.Checkbox(
+                    label="…and convert to a LeRobot dataset straight after",
+                    value=False,
+                    info="Run below then does both steps, on the raw dataset "
+                         "above, with the target and task from its form")
+                # Starts disabled: nothing is filled in yet. The .change()
+                # handlers below own its state from there on.
+                gather_btn = gr.Button("▶  Gather into a raw dataset",
+                                       variant="secondary", interactive=False)
+            with gr.Column(scale=3, min_width=280):
+                gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
+                                        autoscroll=True, visible=False)
+                gather_summary = gr.Markdown(line_breaks=True)
         # Set by the gathering: True only when a real (non-dry) gather succeeded
         # AND the box above was ticked. The chained conversion reads it and bows
         # out otherwise — Gradio has no conditional .then().
@@ -188,27 +209,47 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                confirm_branch_btn, retry_btn,
                run_btn, pause_btn, cancel_btn, confirm_cancel_btn, keep_btn, reset_btn,
                source, target, task, selection_card]
-    # Gathering writes `source` on success, so step 2 is one click away. It never
-    # writes another component the run generator owns, so the two cannot fight
-    # over the same output.
-    #
+    # ---- The panel's interactive states -------------------------------------
+    # Wired per trigger rather than as one handler, so nothing ever writes the
+    # field being typed in or the box being clicked.
+    _st = [community_repo, gather_target, gather_dry, gather_chain]
+    # `input` (every keystroke), not only `change` (on commit): typing the repo
+    # and clicking Gather without leaving the field would otherwise land the click
+    # while the button is still disabled, and do nothing.
+    for _ev in (community_repo.input, community_repo.change,
+                gather_target.input, gather_target.change):
+        _ev(gather_ready, inputs=_st, outputs=gather_btn)
+    for _ev in (gather_target.input, gather_target.change):
+        _ev(mirror_source, inputs=[gather_chain, gather_target], outputs=source)
+    gather_dry.change(dry_toggled, inputs=_st,
+                      outputs=[gather_target, gather_roles, gather_chain, gather_btn])
+    gather_chain.change(chain_toggled, inputs=_st,
+                        outputs=[gather_dry, gather_btn, source])
+
+    # ---- Gathering, on its own ----------------------------------------------
     # `target` and `task` ride along as INPUTS only, so that ticking "and convert"
-    # with either of them empty is refused before a single byte is copied.
-    gather_event = gather_btn.click(
+    # with either of them empty is refused before a single byte is copied. This
+    # button is disabled while that box is ticked, so it only ever gathers.
+    gather_btn.click(
         run_gather,
         inputs=[community_repo, gather_target, gather_roles, gather_dry,
                 gather_chain, target, task],
         outputs=[gather_log, gather_summary, gather_btn, source, gather_chain_state])
-    # Both steps on one click: chained rather than merged, because the conversion
-    # streams into a completely different set of components. It reads `source`
-    # AFTER the gathering wrote it, and run_pipeline_chained returns immediately
-    # when the gathering did not ask for it.
-    chain_event = gather_event.then(
+
+    # ---- Run: the conversion, preceded by a gathering when asked ------------
+    # Two events rather than one function, because the halves stream into
+    # completely different components: the gathering into the panel above, the
+    # conversion into the run panel. gather_before_run writes nothing at all when
+    # "…and convert" is unticked, so a plain Run is untouched by any of this.
+    run_pre_event = run_btn.click(
+        gather_before_run,
+        inputs=[gather_chain, community_repo, gather_target, gather_roles,
+                target, task],
+        outputs=[gather_log, gather_summary, gather_btn, source, gather_chain_state])
+    run_event = run_pre_event.then(
         run_pipeline_chained,
         inputs=[gather_chain_state, source, target, task, debug_sync],
         outputs=outputs)
-    run_event = run_btn.click(run_pipeline, inputs=[source, target, task, debug_sync],
-                              outputs=outputs)
     branch_event = confirm_branch_btn.click(run_pipeline_branch,
                                             inputs=[source, target, task, debug_sync],
                                             outputs=outputs)
@@ -230,9 +271,9 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     # cancel a generator and reliably write that generator's outputs.
     cancel_evt = confirm_cancel_btn.click(
         confirm_cancel, inputs=None, outputs=None,
-        # chain_event carries the conversion half of a gather-and-convert, so
-        # Cancel has to be able to reach it too.
-        cancels=[run_event, branch_event, retry_event, chain_event])
+        # Run is two events now (an optional gathering, then the conversion), so
+        # Cancel has to be able to reach both halves.
+        cancels=[run_pre_event, run_event, branch_event, retry_event])
     cancel_evt.then(reset, inputs=None, outputs=outputs)
 
 

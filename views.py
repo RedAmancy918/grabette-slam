@@ -279,7 +279,14 @@ CSS = """
    Continue button, which a run BLOCKS on, was the visible symptom). Capping the
    container to the viewport gives it its own scrollbar, which works whether the
    app is embedded or opened directly. */
-.gradio-container {max-width: 1080px !important; margin: 0 auto !important;
+/* width:100% is not redundant with max-width. Making this a scroll container
+   (overflow-y) also makes it size to its CONTENT, so the whole app rendered at
+   whatever its widest row happened to demand — 549px with the community panel
+   folded, snapping to the 1080px cap when opening it widened the content. That
+   is what looked like "the panel gets wider when I open it": the panel was fine,
+   the container was elastic. Pinning the width settles the layout once, and
+   every top-level block (the sign-in button included) then keeps it. */
+.gradio-container {width: 100%; max-width: 1080px !important; margin: 0 auto !important;
                    max-height: 100vh; overflow-y: auto;}
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}

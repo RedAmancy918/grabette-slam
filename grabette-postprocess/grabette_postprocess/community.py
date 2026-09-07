@@ -165,10 +165,14 @@ def read_contributions(community_repo: str, *, token: Optional[str] = None,
 def gathered_dirs(raw_repo: str, *, token: Optional[str] = None) -> set[str]:
     """Top-level episode directories already in the consolidated raw dataset.
 
-    An empty set when the repo does not exist yet, which is the first run.
+    An empty set when the repo does not exist yet (the first run), and when no
+    repo is named at all — a dry run may be asked without a target, and it then
+    simply cannot know what is already there.
     """
     from huggingface_hub import HfApi
 
+    if not raw_repo:
+        return set()
     try:
         files = HfApi(token=token).list_repo_files(raw_repo, repo_type="dataset")
     except Exception:  # noqa: BLE001 — not created yet
@@ -182,6 +186,9 @@ def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
            dry_run: bool = False, log=print) -> Plan:
     """Copy the contributed episodes into `raw_repo`. Returns what was done.
 
+    raw_repo may be empty ONLY with dry_run: a preview writes nothing, so it needs
+    no target — it just cannot then say what is already gathered.
+
     One commit per episode, which makes a re-run resumable: an interrupted or
     partial gathering is fixed by running it again, since an episode already
     there is skipped rather than re-uploaded.
@@ -193,6 +200,8 @@ def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
     """
     from huggingface_hub import HfApi, snapshot_download
 
+    if not raw_repo and not dry_run:
+        raise ValueError("a raw dataset to write is required unless dry_run is set")
     api = HfApi(token=token)
     contributions, malformed = read_contributions(community_repo, token=token)
     plan = plan_gathering(contributions, only_contributors=only_contributors,
@@ -203,6 +212,9 @@ def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
         log(f"  ⚠️ {path}: {reason}")
     log(f"{len(contributions)} contribution(s) in {community_repo}; "
         f"{len(plan.gather)} to gather, {len(plan.skipped)} skipped")
+    if not raw_repo:
+        log("  ⚠️ no raw dataset named: this plan cannot account for episodes "
+            "already gathered")
     if dry_run or not plan.gather:
         return plan
 
