@@ -46,7 +46,12 @@ ENV HOME=/home/user \
 # SYSTEM=spaces lets Gradio's get_space() recognize this Docker Space so it uses
 # the real HF OAuth flow (vars injected by hf_oauth: true) instead of the local mock.
 WORKDIR /home/user/app
-COPY --chown=user app.py pipeline.py views.py controller.py review.py session.py /home/user/app/
+# The app's modules, listed rather than copied wholesale so the build context's
+# other files (the vendored package, docs) never end up in the runtime image.
+# ADD A NEW MODULE HERE when you create one: it is not in the image otherwise,
+# and the Space then dies on import at startup with ModuleNotFoundError.
+COPY --chown=user app.py pipeline.py views.py controller.py review.py session.py \
+     gather.py /home/user/app/
 
 EXPOSE 7860
 # Override the base image's offline_vslam entrypoint — we run the conversion app,
