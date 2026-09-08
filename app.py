@@ -79,8 +79,8 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     # by holding the top one to the bottom one's width, never by widening the
     # bottom one. Everything inside is a single stack, so opening the panel only
     # ever adds height (see also the container width note in views.py).
-    with gr.Row():
-        with gr.Column(scale=2, min_width=280):
+    with gr.Row(elem_classes=["panel-row"]):
+        with gr.Column(scale=5, min_width=280):
             # Sign-in gates every action on the page, so it sits above both
             # panels — but in the same column, or it would be the one full-width
             # element on a page whose every other block is this wide.
@@ -132,17 +132,20 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 gather_summary = gr.Markdown(line_breaks=True)
         # Holds the panel to the width of the form's inputs column below. Empty
         # on purpose: the gathering's own log and summary live inside the panel,
-        # so nothing here would ever be shown.
-        with gr.Column(scale=3, min_width=280):
+        # so nothing here would ever be shown. Its scale must match the form's
+        # outputs column, or the two encarts would not line up.
+        with gr.Column(scale=6, min_width=280):
             pass
     # Set by the gathering: True only when a real (non-dry) gather succeeded AND
     # "…and convert" was ticked. The chained conversion reads it and bows out
     # otherwise — Gradio has no conditional .then().
     gather_chain_state = gr.State(False)
 
-    with gr.Row():
+    # `form-row` is the hook the idle-centring CSS keys on: it watches this row's
+    # outputs column for anything rendered in it (see views.py).
+    with gr.Row(elem_classes=["form-row"]):
         # ---- Inputs (left) ----
-        with gr.Column(scale=2, min_width=280):
+        with gr.Column(scale=5, min_width=280):
             source = gr.Textbox(label="Source dataset", info="raw Grabette repo on the Hub",
                                 placeholder="pollen-robotics/grabette-raw")
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
@@ -181,7 +184,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             # Holds the built-but-unpushed dataset context for retry_push.
             retry_state = gr.State(None)
         # ---- Outputs (right) ----
-        with gr.Column(scale=3, min_width=280):
+        with gr.Column(scale=6, min_width=280):
             # Bar + log are revealed only while a run is in progress (running /
             # paused); the generators toggle their visibility via views.io().
             bar_out = gr.HTML(bar(0, "ready"), visible=False)
@@ -201,7 +204,9 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             # line_breaks=True so a single "\n" in a summary/warning renders as a
             # line break (GFM soft breaks) — plain Markdown would collapse it to a
             # space and only "\n\n" (a full paragraph gap) would show.
-            summary_out = gr.Markdown(line_breaks=True)
+            # elem_id so the idle-centring CSS can ask whether there is a result
+            # to show yet (see views.py).
+            summary_out = gr.Markdown(line_breaks=True, elem_id="run-summary")
 
     # Order MUST match the generators' yields (views.io → bar, log; then summary,
     # retry_state; then views.btns → branch, retry, run, pause, cancel,

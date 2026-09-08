@@ -288,6 +288,20 @@ CSS = """
    every top-level block (the sign-in button included) then keeps it. */
 .gradio-container {width: 100%; max-width: 1080px !important; margin: 0 auto !important;
                    max-height: 100vh; overflow-y: auto;}
+/* Idle, i.e. nothing to show on the right: narrow the app to its form so the
+   auto margins above centre it, exactly as the Space looked before. Below this
+   width the two-column row wraps, so the form fills it instead of sitting in a
+   45% column.
+   The two things that can occupy the right are the streaming log and the result
+   summary, so the condition names them: #logbox exists only while a run streams
+   (Gradio 6 drops a hidden block from the DOM entirely), and an empty Markdown
+   renders no child inside .md. Everything ELSE in that column — the review
+   panel's render slot, the empty progress bar — is always there and must not
+   count, which is what a broader "has any child" test got wrong.
+   Keyed on those two rather than on the container's own content, so opening the
+   community panel cannot move the width: it adds nothing on the right. */
+.gradio-container:not(:has(#logbox)):not(:has(#run-summary .md > *))
+                  {max-width: 600px !important;}
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}
 #app-header p {color: var(--body-text-color-subdued); margin: 2px 0 0; font-size: .9rem;}
