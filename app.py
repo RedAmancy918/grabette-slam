@@ -98,14 +98,20 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 community_repo = gr.Textbox(
                     label="Community dataset", info="the repo holding contrib/",
                     placeholder="pollen-robotics/grabette-community-…")
-                # Right under the source it previews, and above everything it
-                # makes irrelevant: a dry run writes nothing, so it needs no
-                # target, no device filter and no conversion.
+                # Right under the source it previews. A dry run still reads the
+                # raw dataset below (to tell new episodes from already-gathered
+                # ones) and the device filter, so it locks neither — only the
+                # conversion, which has nothing to convert.
                 gather_dry = gr.Checkbox(
                     label="Dry run", value=False,
                     info="say what would be gathered, copy nothing")
+                # Named for what it IS, not for one thing done to it: the same
+                # dataset every time, written to by a gathering, read from by the
+                # conversion, and compared against by a dry run.
                 gather_target = gr.Textbox(
-                    label="Raw dataset to write", info="yours; created if needed",
+                    label="Your raw dataset",
+                    info="created if needed; gatherings ADD to it, nothing is "
+                         "replaced or deleted",
                     placeholder="pollen-robotics/fold-a-towel-raw")
                 # The task's required devices. A contribution short of one is left
                 # out and named rather than half-copied: the converter drops a
@@ -127,8 +133,12 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 # handlers below own its state from there on.
                 gather_btn = gr.Button("▶  Gather into a raw dataset",
                                        variant="secondary", interactive=False)
+                # `readout`: a log is read, never typed in. Gradio marks an
+                # output-only Textbox `disabled` just like a locked field, so the
+                # class is what keeps it from looking broken (see views.py).
                 gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
-                                        autoscroll=True, visible=False)
+                                        autoscroll=True, visible=False,
+                                        elem_classes=["readout"])
                 gather_summary = gr.Markdown(line_breaks=True)
         # Holds the panel to the width of the form's inputs column below. Empty
         # on purpose: the gathering's own log and summary live inside the panel,
@@ -189,7 +199,8 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             # paused); the generators toggle their visibility via views.io().
             bar_out = gr.HTML(bar(0, "ready"), visible=False)
             log_out = gr.Textbox(label="Log", lines=15, max_lines=15, autoscroll=True,
-                                 elem_id="logbox", visible=False)
+                                 elem_id="logbox", visible=False,
+                                 elem_classes=["readout"])
 
             # Episode review (reactive): a gr.Timer mirrors THIS session's worker
             # review flags into review_state, and review.build_panel draws one orange
@@ -228,8 +239,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         _ev(gather_ready, inputs=_st, outputs=gather_btn)
     for _ev in (gather_target.input, gather_target.change):
         _ev(mirror_source, inputs=[gather_chain, gather_target], outputs=source)
-    gather_dry.change(dry_toggled, inputs=_st,
-                      outputs=[gather_target, gather_roles, gather_chain, gather_btn])
+    gather_dry.change(dry_toggled, inputs=_st, outputs=[gather_chain, gather_btn])
     gather_chain.change(chain_toggled, inputs=_st,
                         outputs=[gather_dry, gather_btn, source])
 

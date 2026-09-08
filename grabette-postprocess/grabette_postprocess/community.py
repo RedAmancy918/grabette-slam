@@ -131,6 +131,25 @@ def plan_gathering(contributions: Iterable[Contribution], *,
     return plan
 
 
+def skipped_lines(skipped, *, names: int = 6) -> list[str]:
+    """One line per REASON, with a few names each. For the log.
+
+    Grouped rather than listed one episode per line: a routine re-run skips
+    everything already gathered, and a hundred identical lines would bury the
+    reasons that actually need reading. Counted first, named after — and the
+    count is always exact even when the names are cut short.
+    """
+    by_reason: dict[str, list[str]] = {}
+    for c, why in skipped:
+        by_reason.setdefault(why, []).append(f"{c.episode_id} ({c.contributor})")
+    out = []
+    for why, who in sorted(by_reason.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        shown = ", ".join(who[:names])
+        more = f", +{len(who) - names} more" if len(who) > names else ""
+        out.append(f"  – {len(who)} {why}: {shown}{more}")
+    return out
+
+
 def read_contributions(community_repo: str, *, token: Optional[str] = None,
                        revision: str = "main") -> tuple[list[Contribution], list[tuple[str, str]]]:
     """Read every merged manifest from a community dataset.
@@ -215,6 +234,8 @@ def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
     if not raw_repo:
         log("  ⚠️ no raw dataset named: this plan cannot account for episodes "
             "already gathered")
+    for line in skipped_lines(plan.skipped):
+        log(line)
     if dry_run or not plan.gather:
         return plan
 

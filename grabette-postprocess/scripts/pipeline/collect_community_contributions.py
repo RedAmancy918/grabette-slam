@@ -22,14 +22,14 @@ from pathlib import Path
 import click
 
 try:
-    from grabette_postprocess.community import gather
+    from grabette_postprocess.community import gather, skipped_lines
 except ModuleNotFoundError:
     # Run straight from a checkout, without installing the package. Worth the
     # four lines: this step needs `huggingface_hub` and `click` and nothing else,
     # so requiring the full postprocess install (lerobot, opencv, av) to copy
     # files between two Hub repos would be absurd.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from grabette_postprocess.community import gather
+    from grabette_postprocess.community import gather, skipped_lines
 
 
 @click.command()
@@ -37,7 +37,8 @@ except ModuleNotFoundError:
               help="The community dataset holding contrib/ (e.g. "
                    "'pollen-robotics/grabette-community-fold-a-towel')")
 @click.option("--raw-repo", required=True,
-              help="Raw dataset to write, in YOUR namespace (created if needed)")
+              help="YOUR raw dataset (created if needed). Gatherings ADD to it: "
+                   "an episode already there is skipped, nothing is replaced")
 @click.option("--contributor", "contributors", multiple=True,
               help="Only gather from these contributors (repeatable)")
 @click.option("--role", "roles", multiple=True,
@@ -49,10 +50,12 @@ def main(community_repo, raw_repo, contributors, roles, dry_run):
     plan = gather(community_repo, raw_repo,
                   only_contributors=contributors or None,
                   require_roles=roles or None, dry_run=dry_run)
+    # The reasons already went through the log via gather(); repeat the grouped
+    # view at the end so a long run needs no scrolling back.
     if plan.skipped:
         click.echo("\nLeft out:")
-        for c, why in plan.skipped:
-            click.echo(f"  {c.episode_id} ({c.contributor}): {why}")
+        for line in skipped_lines(plan.skipped, names=20):
+            click.echo(line)
     if not dry_run and plan.gather:
         click.echo("\nNext: convert it with the SLAM Space —")
         click.echo(f"  source repo: {raw_repo}")

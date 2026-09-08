@@ -86,12 +86,17 @@ def gather_ready(community, raw, dry, chain):
 
 
 def dry_toggled(community, raw, dry, chain):
-    """Dry run copies nothing, so the fields that only matter for a real copy are
-    locked while it is on. Locked, not cleared: the values stay, so the preview
-    still honours a device filter set earlier and un-ticking restores everything."""
-    on = not bool(dry)
-    return (gr.update(interactive=on), gr.update(interactive=on),
-            gr.update(interactive=on),
+    """A dry run locks the conversion, and nothing else.
+
+    It is tempting to grey out everything a preview "does not need", and wrong:
+      * the raw dataset IS used — it is what the preview compares against to say
+        which episodes are new rather than already gathered. Locking it made the
+        more useful kind of dry run impossible to set up;
+      * the device filter IS used — it decides what the preview reports as left
+        out.
+    Only converting is meaningless with nothing copied, so only that is locked.
+    """
+    return (gr.update(interactive=not bool(dry)),
             gather_ready(community, raw, dry, chain))
 
 
