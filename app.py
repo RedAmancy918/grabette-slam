@@ -133,12 +133,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 # handlers below own its state from there on.
                 gather_btn = gr.Button("▶  Gather into a raw dataset",
                                        variant="secondary", interactive=False)
-                # `readout`: a log is read, never typed in. Gradio marks an
-                # output-only Textbox `disabled` just like a locked field, so the
-                # class is what keeps it from looking broken (see views.py).
-                gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
-                                        autoscroll=True, visible=False,
-                                        elem_classes=["readout"])
+                # ONE message rather than a log box plus a summary: the two
+                # halves made the reader join them up, and the half worth reading
+                # was never the one they were looking at. gather.py renders the
+                # access checks, the counts, what was left out and the result
+                # into this single Markdown.
                 gather_summary = gr.Markdown(line_breaks=True)
         # Holds the panel to the width of the form's inputs column below. Empty
         # on purpose: the gathering's own log and summary live inside the panel,
@@ -251,7 +250,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         run_gather,
         inputs=[community_repo, gather_target, gather_roles, gather_dry,
                 gather_chain, target, task],
-        outputs=[gather_log, gather_summary, gather_btn, source, gather_chain_state])
+        outputs=[gather_summary, gather_btn, source, gather_chain_state])
 
     # ---- Run: the conversion, preceded by a gathering when asked ------------
     # Two events rather than one function, because the halves stream into
@@ -262,7 +261,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         gather_before_run,
         inputs=[gather_chain, community_repo, gather_target, gather_roles,
                 target, task],
-        outputs=[gather_log, gather_summary, gather_btn, source, gather_chain_state])
+        outputs=[gather_summary, gather_btn, source, gather_chain_state])
     run_event = run_pre_event.then(
         run_pipeline_chained,
         inputs=[gather_chain_state, source, target, task, debug_sync],

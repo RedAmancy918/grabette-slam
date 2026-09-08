@@ -337,6 +337,16 @@ input:disabled, textarea:disabled, select:disabled {
    checkbox the pointer is almost never over the input itself. */
 label:has(input:disabled), label:has(input:disabled) * {cursor: not-allowed !important;}
 button:disabled {opacity: .45 !important; cursor: not-allowed !important;}
+/* A READOUT is not a locked control. Gradio renders an output-only Textbox with
+   exactly the same `disabled` attribute as one the user is forbidden to edit
+   (measured: identical down to the computed styles), so the difference cannot be
+   inferred from the DOM and has to be declared. Without this the log boxes read
+   as broken fields — which is how the gathering log looked. */
+.block.readout {opacity: 1 !important;}
+.readout textarea:disabled {background: var(--input-background-fill) !important;
+                            color: var(--body-text-color) !important;
+                            border-color: var(--border-color-primary) !important;
+                            cursor: default !important;}
 /* Episode-review actions: orange to match the flagged-episode cards (warning),
    not the default emerald primary.
    Both `.btn-x` and `.btn-x button` are targeted because Gradio 6 puts

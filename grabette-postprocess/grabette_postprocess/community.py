@@ -32,6 +32,12 @@ from typing import Iterable, Optional
 
 CONTRIB_DIR = "contrib"
 
+# The reason a contribution is skipped because it is already in the raw dataset.
+# A constant because callers COUNT it separately from the reasons that need
+# reading — "8 already gathered" is reassurance, "1 missing an arm" is a problem —
+# and keying that split on a prose string typed twice would break silently.
+ALREADY_GATHERED = "already gathered"
+
 
 @dataclass
 class Contribution:
@@ -120,7 +126,7 @@ def plan_gathering(contributions: Iterable[Contribution], *,
             continue
         seen.add(c.dir_name)
         if c.dir_name in have:
-            plan.skipped.append((c, "already gathered"))
+            plan.skipped.append((c, ALREADY_GATHERED))
             continue
         if need and not need.issubset(set(c.roles)):
             plan.skipped.append(
@@ -202,11 +208,16 @@ def gathered_dirs(raw_repo: str, *, token: Optional[str] = None) -> set[str]:
 def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
            only_contributors: Optional[Iterable[str]] = None,
            require_roles: Optional[Iterable[str]] = None,
-           dry_run: bool = False, log=print) -> Plan:
+           dry_run: bool = False, log=print, on_plan=None) -> Plan:
     """Copy the contributed episodes into `raw_repo`. Returns what was done.
 
     raw_repo may be empty ONLY with dry_run: a preview writes nothing, so it needs
     no target — it just cannot then say what is already gathered.
+
+    on_plan(plan) is called once the plan is known and BEFORE any copying, so a
+    caller can show the counts while the copy runs rather than only after it. The
+    plan it receives is not final: episodes whose source turns out to be missing
+    are moved to `skipped` as the copy proceeds.
 
     One commit per episode, which makes a re-run resumable: an interrupted or
     partial gathering is fixed by running it again, since an episode already
@@ -236,6 +247,8 @@ def gather(community_repo: str, raw_repo: str, *, token: Optional[str] = None,
             "already gathered")
     for line in skipped_lines(plan.skipped):
         log(line)
+    if on_plan is not None:
+        on_plan(plan)
     if dry_run or not plan.gather:
         return plan
 

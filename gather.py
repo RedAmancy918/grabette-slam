@@ -23,6 +23,7 @@ import gradio as gr
 from huggingface_hub import HfApi
 
 from controller import _preflight
+from grabette_postprocess.community import ALREADY_GATHERED, skipped_lines
 from grabette_postprocess.community import gather as gather_contributions
 
 # Whether the Gather button is usable, and what it says while it is not.
@@ -32,9 +33,69 @@ _IDLE = "▶  Gather into a raw dataset"
 _BUSY = "Gathering…"
 
 
-def _view(log_lines, summary="", *, busy, source=None, proceed=False, chained=False):
-    """The panel's five outputs: log, summary, button, the conversion form's
-    source field (on success), and whether the conversion may proceed.
+def _render(title, checks=(), counts=(), detail=(), footer="") -> str:
+    """One message, in the shape the conversion's own summary uses.
+
+    Everything the gathering has to say goes here — the access checks, the
+    counts, what was left out and why, the result — because a log box beside a
+    summary made the reader join two halves themselves, and the interesting half
+    was never the one they were looking at.
+
+    checks: (ok, text) pairs, rendered ✅ or ❌.
+    counts: (number, text) pairs, one per LINE: the numbers are the answer to
+        "did it do anything", and a sentence hides them.
+    """
+    lines = [f"### {title}"]
+    lines += [("✅ " if ok else "❌ ") + text for ok, text in checks]
+    if counts:
+        lines.append("")
+        lines += [f"**{n}** {text}" for n, text in counts]
+    if detail:
+        lines.append("")
+        lines += list(detail)
+    if footer:
+        lines.append("")
+        lines.append(footer)
+    return "\n".join(lines)
+
+
+def esc_md(text) -> str:
+    """Keep a repo id or a Hub error from being read as Markdown."""
+    out = str(text)
+    for ch in ("\\", "`", "*", "_", "[", "]"):
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
+def _counts(plan_seen, community_repo, *, done, plan=None):
+    """The numbers, one per line: contributions seen, gathered, left out for a
+    reason worth reading, and already gathered.
+
+    Split that way because the three mean different things. "8 already gathered"
+    is reassurance that a re-run is doing nothing wrong; "1 left out" is the one
+    that needs looking at; folding them into a single "9 skipped" hid the second
+    behind the first.
+
+    Reads the plan the library hands over BEFORE copying (plan_seen), so the
+    counts are on screen while the copy runs, not only after it.
+    """
+    p = plan or (plan_seen[0] if plan_seen else None)
+    if p is None:
+        return []
+    already = sum(1 for _c, why in p.skipped if why == ALREADY_GATHERED)
+    others = len(p.skipped) - already
+    out = [(len(p.gather) + len(p.skipped), f"contribution(s) in `{community_repo}`"),
+           (len(p.gather), "gathered" if done else "to gather")]
+    if others:
+        out.append((others, "left out — see below"))
+    if already:
+        out.append((already, "already gathered, left as they are"))
+    return out
+
+
+def _view(message="", *, busy, source=None, proceed=False, chained=False):
+    """The panel's four outputs: the message, the button, the conversion form's
+    source field, and whether the conversion may proceed.
 
     `proceed` defaults to False on EVERY yield, so a refusal, a dry run or a
     failure can never leave a stale True behind for the .then() to act on.
@@ -44,8 +105,7 @@ def _view(log_lines, summary="", *, busy, source=None, proceed=False, chained=Fa
     ticked it is Run that owns the action.
     """
     return (
-        gr.update(value="\n".join(log_lines), visible=bool(log_lines)),
-        summary,
+        message,
         gr.update(value=_BUSY if busy else _IDLE,
                   interactive=not busy and not chained),
         gr.skip() if source is None else gr.update(value=source),
@@ -56,7 +116,7 @@ def _view(log_lines, summary="", *, busy, source=None, proceed=False, chained=Fa
 def _passthrough():
     """Write nothing, and let the conversion proceed: Run with "…and convert"
     unticked must behave exactly as it always has, gather panel untouched."""
-    return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), True)
+    return (gr.skip(), gr.skip(), gr.skip(), True)
 
 
 def _source_only_check(api, repo):
@@ -165,38 +225,40 @@ def run_gather(community_repo, raw_repo, roles, dry_run, chain=False,
     token = oauth_token.token  # local only — never os.environ, see controller._run
     scopes = frozenset((getattr(oauth_token, "scope", "") or "").split())
 
-    logs = ["Checking repo access…"]
-    yield _view(logs, busy=True, chained=chain)
-
     api = HfApi(token=token)
-    # The target may well already exist here (a second gathering adds to it), so
-    # only the error matters — unlike a conversion, where an existing target means
+    yield _view(_render("Gathering community contributions"), busy=True, chained=chain)
+
+    # ---- access ------------------------------------------------------------
+    # The target may well already exist (a second gathering adds to it), so only
+    # the error matters — unlike a conversion, where an existing target means
     # something. With no target at all (a dry run), only the source is checked:
-    # asking for write access to a repo nobody will write to would refuse a
+    # demanding write access to a repo nobody will write to would refuse a
     # perfectly good preview.
     if raw_repo:
         _exists, _writable, err = _preflight(api, community_repo, raw_repo, scopes)
     else:
         err = _source_only_check(api, community_repo)
     if err:
-        logs.append(err)
-        yield _view(logs, summary=f"### ⚠️ {err.splitlines()[0]}", busy=False,
-                    chained=chain)
+        yield _view(_render("Cannot gather", checks=[(False, err.replace("\n", " "))]),
+                    busy=False, chained=chain)
         return
-    logs.append("  ✓ community dataset readable")
+    checks = [(True, f"`{community_repo}` readable")]
     if raw_repo:
-        logs.append(f"  ✓ write access to '{raw_repo.split('/')[0]}'")
-    yield _view(logs, busy=True, chained=chain)
+        checks.append((True, f"write access to `{raw_repo.split('/')[0]}`"))
+    yield _view(_render("Gathering community contributions", checks=checks),
+                busy=True, chained=chain)
 
+    # ---- the work ----------------------------------------------------------
     q: "queue.Queue[str]" = queue.Queue()
     result: dict = {}
+    plan_seen: list = []
 
     def work():
         try:
             result["plan"] = gather_contributions(
                 community_repo, raw_repo, token=token,
                 require_roles=list(roles or ()) or None,
-                dry_run=bool(dry_run), log=q.put)
+                dry_run=bool(dry_run), log=q.put, on_plan=plan_seen.append)
         except Exception as e:  # noqa: BLE001 — surfaced in the panel, never a traceback
             result["error"] = str(e)
         finally:
@@ -204,56 +266,61 @@ def run_gather(community_repo, raw_repo, roles, dry_run, chain=False,
 
     t = threading.Thread(target=work, daemon=True)
     t.start()
+    last = ""
     while True:
         line = q.get()
         if line is None:
             break
-        logs.append(line)
-        yield _view(logs, busy=True, chained=chain)
+        # The library's own log lines are progress, not the report: only the
+        # newest is shown, under the counts, so the message stays one screenful.
+        last = line.strip()
+        yield _view(_render("Gathering community contributions", checks=checks,
+                            counts=_counts(plan_seen, community_repo, done=False),
+                            footer=f"_{esc_md(last)}_" if last else ""),
+                    busy=True, chained=chain)
 
     if "error" in result:
-        logs.append(f"✗ {result['error']}")
-        yield _view(logs, summary=f"### ✗ Gathering failed\n{result['error']}",
+        yield _view(_render("Gathering failed", checks=checks + [(False, esc_md(result["error"]))]),
                     busy=False, chained=chain)
         return
 
     plan = result["plan"]
-    n, left_out = len(plan.gather), len(plan.skipped)
-    url = f"https://huggingface.co/datasets/{raw_repo}"
+    others = [(c, why) for c, why in plan.skipped if why != ALREADY_GATHERED]
+    detail = [l.strip() for l in skipped_lines(others)] if others else []
+    n = len(plan.gather)
+    url = f"https://huggingface.co/datasets/{raw_repo}" if raw_repo else ""
+
     if dry_run:
-        where = f" into `{raw_repo}`" if raw_repo else ""
-        summary = (f"### Dry run — nothing copied\n{n} episode(s) would be gathered{where}"
-                   + (f", {left_out} left out (see the log)." if left_out else ".")
-                   + ("" if raw_repo else
-                      "\n\nWith no raw dataset named, this cannot tell what is already "
-                      "gathered — fill one in to see only what is new."))
-        yield _view(logs, summary=summary, busy=False, chained=chain)
+        footer = (f"Nothing was copied. Untick **Dry run** to gather them."
+                  if n else "Nothing new to copy.")
+        if not raw_repo:
+            footer += ("\n\nWith no raw dataset named, this cannot tell what is already "
+                       "gathered — fill one in to see only what is new.")
+        yield _view(_render("Dry run", checks=checks,
+                            counts=_counts(plan_seen, community_repo, done=False, plan=plan),
+                            detail=detail, footer=footer),
+                    busy=False, chained=chain)
         return
+
     if not n:
-        # Not a failure: everything merged so far is already there. Say which,
-        # rather than leaving an empty panel to be read as a broken run.
-        summary = (f"### Nothing new to gather\n"
-                   f"Every contribution merged into `{community_repo}` is already in "
-                   f"[`{raw_repo}`]({url})."
-                   + (f" {left_out} left out (see the log)." if left_out else "")
-                   + f"\n\n**Source dataset** in the form below is set to it: **Run** "
-                     f"there to build the LeRobot dataset.")
-        # Nothing new is not a failure, and there IS something to convert, so a
-        # chained run still goes ahead on what is already gathered.
-        yield _view(logs, summary=summary, busy=False, source=raw_repo,
-                    proceed=chain, chained=chain)
+        # Not a failure: everything merged so far is already there.
+        footer = f"Nothing new to copy — [{raw_repo}]({url}) is up to date."
+        yield _view(_render("Already up to date", checks=checks,
+                            counts=_counts(plan_seen, community_repo, done=True, plan=plan),
+                            detail=detail, footer=footer),
+                    busy=False, chained=chain,
+                    source=raw_repo if chain else None, proceed=chain)
         return
-    summary = (
-        f"### ✅ {n} episode(s) gathered\n"
-        f"- **Raw dataset:** 👉 [`{raw_repo}`]({url}) 👈\n"
-        + (f"- {left_out} contribution(s) left out — see the log for each reason.\n"
-           if left_out else "")
-        + (f"\n**Converting it now** into `{conv_target.strip()}` — the run panel on "
-           f"the right takes over from here."
-           if chain else
-           f"\n**This is a raw dataset, not a LeRobot one.** **Source dataset** in "
-           f"the form below is now set to `{raw_repo}`: fill in a target and a task "
-           f"description, then **Run** to build the LeRobot dataset from it.")
-    )
-    yield _view(logs, summary=summary, busy=False, source=raw_repo,
-                    proceed=chain, chained=chain)
+
+    footer = f"**Raw dataset:** 👉 [{raw_repo}]({url})"
+    footer += (f"\n\n**Converting it now** into `{conv_target.strip()}` — the run "
+               f"panel takes over from here."
+               if chain else
+               f"\n\nThis is a **raw** dataset, not a LeRobot one. Put it in "
+               f"**Source dataset** below, with a target and a task description, "
+               f"then **Run**.")
+    yield _view(_render(f"{n} episode(s) gathered", checks=checks,
+                        counts=_counts(plan_seen, community_repo, done=True, plan=plan),
+                        detail=detail, footer=footer),
+                busy=False, chained=chain,
+                source=raw_repo if chain else None, proceed=chain)
