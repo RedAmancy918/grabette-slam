@@ -298,9 +298,13 @@ CSS = """
    renders no child inside .md. Everything ELSE in that column — the review
    panel's render slot, the empty progress bar — is always there and must not
    count, which is what a broader "has any child" test got wrong.
-   Keyed on those two rather than on the container's own content, so opening the
-   community panel cannot move the width: it adds nothing on the right. */
-.gradio-container:not(:has(#logbox)):not(:has(#run-summary .md > *))
+   The gathering's result counts as a third: it lands in its own row's right-hand
+   column, and widening for it is what puts it BESIDE the panel instead of under
+   it.
+   Keyed on those three rather than on the container's own content, so merely
+   opening the community panel cannot move the width: it adds nothing on a right
+   at all. */
+.gradio-container:not(:has(#logbox)):not(:has(#run-summary .md > *)):not(:has(#gather-summary .md > *))
                   {max-width: 600px !important;}
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}

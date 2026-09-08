@@ -133,18 +133,20 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 # handlers below own its state from there on.
                 gather_btn = gr.Button("▶  Gather into a raw dataset",
                                        variant="secondary", interactive=False)
-                # ONE message rather than a log box plus a summary: the two
-                # halves made the reader join them up, and the half worth reading
-                # was never the one they were looking at. gather.py renders the
-                # access checks, the counts, what was left out and the result
-                # into this single Markdown.
-                gather_summary = gr.Markdown(line_breaks=True)
-        # Holds the panel to the width of the form's inputs column below. Empty
-        # on purpose: the gathering's own log and summary live inside the panel,
-        # so nothing here would ever be shown. Its scale must match the form's
-        # outputs column, or the two encarts would not line up.
+
+        # The gathering's result, BESIDE the panel rather than inside it — the
+        # same place and the same shape as the conversion's own output below.
+        # Which is also what holds the panel to the width of the form's inputs
+        # column: this column's scale must match the form's outputs column, or
+        # the two encarts would not line up.
+        #
+        # ONE message rather than a log box plus a summary: the two halves made
+        # the reader join them up, and the half worth reading was never the one
+        # they were looking at. gather.py renders the access checks, the counts,
+        # what was left out and the result into this single Markdown.
+        # elem_id so the idle-centring CSS can see it (see views.py).
         with gr.Column(scale=6, min_width=280):
-            pass
+            gather_summary = gr.Markdown(line_breaks=True, elem_id="gather-summary")
     # Set by the gathering: True only when a real (non-dry) gather succeeded AND
     # "…and convert" was ticked. The chained conversion reads it and bows out
     # otherwise — Gradio has no conditional .then().
