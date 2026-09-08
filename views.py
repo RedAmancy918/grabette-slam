@@ -313,6 +313,30 @@ CSS = """
 .gather-note p {color: var(--body-text-color-subdued); font-size: .85rem;
                 margin: 0 0 6px;}
 footer {display: none !important;}
+/* --- interactive vs not -----------------------------------------------------
+   Gradio's own disabled styling is nearly invisible on a textbox: measured, a
+   disabled one keeps the same white fill, the same text colour and full opacity,
+   and only its cursor changes. A checkbox merely drops to .75 opacity while its
+   label stays at full strength. So a locked field read as an editable one.
+
+   Two signals, together, because either alone is easy to miss: the whole field
+   dims (its label pill, its hint and its control at once) AND the control gets a
+   filled, plainly un-editable look with a not-allowed cursor.
+
+   `:not(:has(.block))` keeps this to LEAF blocks — one field — so a container
+   that merely HOLDS a disabled field, the community panel included, is never
+   dimmed as a whole. Theme variables rather than literals, so this follows a
+   dark theme instead of fighting it. */
+.block:not(:has(.block)):has(:disabled) {opacity: .5;}
+input:disabled, textarea:disabled, select:disabled {
+  background: var(--neutral-100) !important;
+  color: var(--body-text-color-subdued) !important;
+  border-color: var(--border-color-primary) !important;
+  cursor: not-allowed !important;}
+/* The cursor has to be claimed on the label and its children too: on a Gradio
+   checkbox the pointer is almost never over the input itself. */
+label:has(input:disabled), label:has(input:disabled) * {cursor: not-allowed !important;}
+button:disabled {opacity: .45 !important; cursor: not-allowed !important;}
 /* Episode-review actions: orange to match the flagged-episode cards (warning),
    not the default emerald primary.
    Both `.btn-x` and `.btn-x button` are targeted because Gradio 6 puts
