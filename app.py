@@ -63,10 +63,6 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
         "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
     )
-    # Sign-in gates every action on the page (both panels below), so it belongs
-    # above them rather than inside the conversion form's column.
-    gr.LoginButton(size="sm")
-
     # ---- Community contributions (step 1, folded away) ----------------------
     # A community dataset holds only manifests; its recordings live in each
     # contributor's own raw dataset. This gathers them into ONE raw dataset that
@@ -77,16 +73,20 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
     # widened the inputs column past its share and the Row wrapped — the whole
     # form jumped to a single left-aligned stack. A full-width band of its own
     # also reads better: step 1 spans the page, step 2's form sits under it.
-    # Same two-column split as the conversion form below (scale 2 / 3), so the
-    # two panels line up: inputs on the left at the same width, log and result on
-    # the right. This only became safe once `.gradio-container` got an explicit
-    # width — it used to size to its content, so opening this panel snapped the
-    # whole page from ~549px to the 1080px cap, which looked like the panel
-    # widening itself. See the CSS note in views.py.
-    with gr.Accordion("Gather community contributions (optional)",
-                      open=False):
-        with gr.Row():
-            with gr.Column(scale=2, min_width=280):
+    # The panel sits in a column with the SAME scale as the conversion form's
+    # inputs column below (2 of 2+3), with an empty column beside it. That is what
+    # makes the two encarts exactly as wide as each other, at the same left edge —
+    # by holding the top one to the bottom one's width, never by widening the
+    # bottom one. Everything inside is a single stack, so opening the panel only
+    # ever adds height (see also the container width note in views.py).
+    with gr.Row():
+        with gr.Column(scale=2, min_width=280):
+            # Sign-in gates every action on the page, so it sits above both
+            # panels — but in the same column, or it would be the one full-width
+            # element on a page whose every other block is this wide.
+            gr.LoginButton(size="sm")
+            with gr.Accordion("Gather community contributions (optional)",
+                              open=False):
                 gr.Markdown(
                     "Only for a **community** dataset, whose episodes live in each "
                     "contributor's own repo. This copies them into one raw dataset."
@@ -113,13 +113,11 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 gather_roles = gr.CheckboxGroup(
                     ["left", "right", "casquette"], label="Required devices",
                     info="leave empty to gather every contribution")
-                # One click for both steps. The conversion then reads the raw
-                # dataset just written, with the Target dataset and Task
-                # description from the form below — which is why those two are
-                # validated BEFORE any copying starts.
-                # Ticking this hands the action to Run below: it then gathers
-                # first and converts what it gathered, which is why this locks
-                # Dry run and the Gather button.
+                # Hands the action to Run below: it then gathers first and
+                # converts what it gathered, which is why this locks Dry run and
+                # the Gather button. Run reads the Target dataset and Task
+                # description from its own form, and those two are validated
+                # BEFORE any copying starts.
                 gather_chain = gr.Checkbox(
                     label="…and convert to a LeRobot dataset straight after",
                     value=False,
@@ -129,14 +127,18 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
                 # handlers below own its state from there on.
                 gather_btn = gr.Button("▶  Gather into a raw dataset",
                                        variant="secondary", interactive=False)
-            with gr.Column(scale=3, min_width=280):
                 gather_log = gr.Textbox(label="Gathering log", lines=8, max_lines=8,
                                         autoscroll=True, visible=False)
                 gather_summary = gr.Markdown(line_breaks=True)
-        # Set by the gathering: True only when a real (non-dry) gather succeeded
-        # AND the box above was ticked. The chained conversion reads it and bows
-        # out otherwise — Gradio has no conditional .then().
-        gather_chain_state = gr.State(False)
+        # Holds the panel to the width of the form's inputs column below. Empty
+        # on purpose: the gathering's own log and summary live inside the panel,
+        # so nothing here would ever be shown.
+        with gr.Column(scale=3, min_width=280):
+            pass
+    # Set by the gathering: True only when a real (non-dry) gather succeeded AND
+    # "…and convert" was ticked. The chained conversion reads it and bows out
+    # otherwise — Gradio has no conditional .then().
+    gather_chain_state = gr.State(False)
 
     with gr.Row():
         # ---- Inputs (left) ----
