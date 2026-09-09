@@ -33,7 +33,7 @@ from huggingface_hub import HfApi, snapshot_download
 from pydantic import BaseModel
 
 import review
-from views import CSS, THEME, bar, visualizer_url
+from views import CSS, THEME, bar, space_banner, visualizer_url
 from controller import (
     confirm_cancel,
     keep_running,
@@ -45,12 +45,29 @@ from controller import (
     toggle_pause,
 )
 
+# ── Which deployment this process IS. HF sets SPACE_ID ("owner/grabette-slam-test")
+# in every Space; absent when run locally, which reads as prod (see space_banner).
+SPACE_ID = os.environ.get("SPACE_ID", "")
+# Which ref the deploy workflow last pushed HERE. Set as Space *variables* by
+# .github/workflows/deploy-branch-to-hf-test-space.yml rather than committed as a
+# stamp file: the deployed tree then stays byte-identical to the branch it came
+# from, and the Dockerfile needs no COPY for a file that only exists on the test
+# Space. The price is that pushing to a Space by hand leaves the previous run's
+# stamp in place — so the banner words it as the last *deploy*, and an unset
+# variable is reported as unknown rather than quietly omitted.
+DEPLOYED_REF = os.environ.get("GRABETTE_DEPLOYED_REF", "")
+DEPLOYED_SHA = os.environ.get("GRABETTE_DEPLOYED_SHA", "")
+
 # ── Standalone FastAPI app — Gradio is mounted onto it so custom routes survive.
 # Registering routes on demo.app before launch() is unreliable in Gradio 6: the
 # internal FastAPI instance may be replaced, dropping the handlers.
 fastapi_app = FastAPI()
 
 with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
+    # Above the header, and only on a test deployment — production renders no
+    # component at all rather than an empty div taking up a margin.
+    if _BANNER := space_banner(SPACE_ID, DEPLOYED_REF, DEPLOYED_SHA):
+        gr.HTML(_BANNER)
     gr.HTML(
         "<div id='app-header'><h1>Grabette post-processing</h1>"
         "<p>Raw Grabette recording → SLAM → LeRobot dataset on the Hub</p></div>"
