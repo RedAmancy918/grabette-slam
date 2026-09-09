@@ -29,6 +29,10 @@ A HuggingFace Space that turns a raw Grabette recording dataset into a
    [LeRobot visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
    is shown for the result (the dataset must be public to be visualized).
 
+## Access the spaces
+- [main space](https://huggingface.co/spaces/pollen-robotics/grabette-slam)
+- [test space](https://huggingface.co/spaces/pollen-robotics/grabette-slam-test)
+
 ## Why a Docker Space
 
 The SLAM step is a compiled C++ binary (`offline_vslam`, built on RTAB-Map).
