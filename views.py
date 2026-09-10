@@ -12,6 +12,49 @@ import re
 import gradio as gr
 
 VISUALIZER = "https://huggingface.co/spaces/lerobot/visualize_dataset"
+GITHUB_REPO = "https://github.com/pollen-robotics/grabette-slam"
+
+
+def is_test_space(space_id: str) -> bool:
+    """Is this the development deployment? A pure function of the Space name
+    ("pollen-robotics/grabette-slam-test"), which is the whole convention — there
+    is no variable to set, and nothing to remember to unset before shipping."""
+    return space_id.endswith("-test")
+
+
+def space_banner(space_id: str, deployed_ref: str = "", deployed_sha: str = "") -> str:
+    """Which deployment the operator is looking at, above the header. Empty on
+    production, so the normal page stays quiet.
+
+    Two identical-looking tabs is how a real dataset gets converted on the scratch
+    Space — or worse, how a scratch branch's output gets taken for production
+    data — so the answer is on the page rather than in the URL bar. Built once at
+    import from process-lifetime values: none of it can change while the Space
+    runs.
+
+    `deployed_ref`/`deployed_sha` are stamped by the deploy workflow (see
+    DEPLOYED_REF in app.py). An unstamped test Space says so rather than showing
+    nothing: a push that skipped the workflow is the case worth noticing.
+    """
+    if not is_test_space(space_id):
+        return ""
+    if not deployed_ref:
+        origin = ('Deployed ref <b>unknown</b> (pushed outside the deploy '
+                  'workflow, or before it stamped one)')
+    else:
+        ref = html.escape(deployed_ref)
+        origin = f'Deployed from <code>{ref}</code>'
+        if deployed_sha:
+            sha = html.escape(deployed_sha)
+            # The sha links to the commit: a branch name stops answering "which
+            # code is this?" as soon as the branch moves on after the deploy.
+            origin += (f' (<a href="{GITHUB_REPO}/commit/{sha}" target="_blank"'
+                       f' rel="noopener"><code>{sha}</code></a>)')
+    # One line per question — what this Space is, then what is on it. Run
+    # together they read as one sentence, and the ref (the part that changes
+    # between deploys) was the easiest thing to skim past. Same shape as the
+    # fleet's banner, which the operator sees in the next tab.
+    return f'<div id="env-banner"><b>TEST SPACE</b><br>{origin}</div>'
 
 
 def visualizer_url(repo_id: str) -> str:
@@ -284,6 +327,16 @@ CSS = """
 #app-header {text-align:center; margin: 2px 0 6px;}
 #app-header h1 {font-size: 1.45rem; margin: 0;}
 #app-header p {color: var(--body-text-color-subdued); margin: 2px 0 0; font-size: .9rem;}
+/* Deployment banner: which Space this is and what was deployed to it. Full-width
+   above the title — it has to be read before a run is started, not found
+   afterwards. Purple on a translucent wash so it reads on both the light and the
+   dark Gradio theme; the text itself keeps the theme's own colour. */
+#env-banner {border-radius: 10px; padding: .5rem .8rem; margin: 0 0 8px;
+             font-size: .85rem; font-weight: 600; line-height: 1.45;
+             background: rgba(139,92,246,.16); border: 1px solid rgba(139,92,246,.55);
+             color: var(--body-text-color); text-align: center;}
+#env-banner code {font-weight: 700;}
+#env-banner a {color: inherit; text-decoration: underline; text-underline-offset: 2px;}
 #logbox textarea {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                   font-size: 12px; line-height: 1.35;}
 footer {display: none !important;}
