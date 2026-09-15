@@ -496,7 +496,59 @@ async def api_quality(repo_id: str):
 
 # Mount Gradio onto the FastAPI app. queue() is required for streaming generators
 # and for the Stop button's cancels=[] to take effect.
+def _without_session_cookie(headers):
+    """The request headers with the `session` cookie removed, others untouched."""
+    out = []
+    for name, value in headers:
+        if name.lower() == b"cookie":
+            kept = [c for c in value.split(b";") if not c.strip().startswith(b"session=")]
+            if not kept:
+                continue
+            value = b";".join(kept)
+        out.append((name, value))
+    return out
+
+
+class _FreshLoginSession:
+    """Start every login handshake from an empty session.
+
+    Signing in twice used to loop forever between /login/huggingface and
+    /login/callback. The session cookie still held `oauth_info` from the previous
+    login — ~3.3 kB of access/refresh/id tokens — and starting a new login wrote
+    that again next to the fresh `_state_huggingface_*`, landing at 4139 bytes.
+    Browsers store at most 4096, so they dropped the Set-Cookie silently; the
+    callback then arrived with the OLD cookie, which carried no state, and gradio
+    bounced it back to the login route. Gradio's own recovery only fires when the
+    cookie cannot be DECODED — this one decoded fine — so nothing broke the cycle
+    and the only way out was deleting the cookie by hand.
+
+    Dropping the cookie on the way in makes SessionMiddleware start a new session,
+    so the handshake carries the state alone (~90 bytes). Re-authenticating
+    supersedes the old token anyway. Only /login/huggingface is stripped: the
+    callback must keep its cookie, that is where the state is read back from.
+
+    Why the cookie and not `request.session`: gradio calls attach_oauth() inside
+    App.create_app(), so SessionMiddleware lives on the INNER app that
+    mount_gradio_app() mounts at "/". Anything wrapping the outer app runs before
+    that middleware and has no scope["session"] — touching it raises
+    "SessionMiddleware must be installed to access request.session".
+
+    Plain ASGI rather than @app.middleware("http") for the same reason, and
+    because BaseHTTPMiddleware interferes with the streaming responses gradio's
+    queue depends on.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == "/login/huggingface":
+            scope = dict(scope, headers=_without_session_cookie(scope["headers"]))
+        await self.app(scope, receive, send)
+
+
 app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/", theme=THEME, css=CSS)
+app = _FreshLoginSession(app)
 
 if __name__ == "__main__":
     import uvicorn
