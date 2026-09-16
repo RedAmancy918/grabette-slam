@@ -89,9 +89,11 @@ The recording (`grabette/hardware/oakd.py`) stores compact mp4 + JSON sidecars.
 binary.
 
 `run_oak_slam.py` then runs RTAB-Map odometry in Docker, integrates the
-frame-to-frame deltas into absolute poses, gravity-aligns the trajectory
-(world Z-up, estimated robustly from the accel stream), and writes
-`camera_trajectory.csv`.
+frame-to-frame deltas into absolute poses, rotates the world frame to Z-up
+(x forward, y left, z up) and writes `camera_trajectory.csv`. With an IMU the
+rotation comes from gravity, estimated robustly from the accel stream; on an
+IMU-less camera (Orbbec Gemini 305) it is the fixed optical → Z-up rotation,
+which assumes the camera starts roughly level.
 
 ### 2. Validate data and trajectories
 
