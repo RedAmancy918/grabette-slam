@@ -547,7 +547,13 @@ class _FreshLoginSession:
         await self.app(scope, receive, send)
 
 
-app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/", theme=THEME, css=CSS)
+# run_history=False: gradio 6 defaults it True and records every API call into the
+# browser's localStorage. The review panel polls on a gr.Timer(0.5), so that is two
+# entries a second for as long as a tab is open — unbounded growth against a ~5 MB
+# per-origin quota, for calls nobody reviews. Switching it off also clears what the
+# app has already saved in visitors' browsers.
+app = gr.mount_gradio_app(fastapi_app, demo.queue(), path="/", theme=THEME, css=CSS,
+                          run_history=False)
 app = _FreshLoginSession(app)
 
 if __name__ == "__main__":
