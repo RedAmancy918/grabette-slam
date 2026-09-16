@@ -18,14 +18,21 @@ from scipy.spatial.transform import Rotation
 DEFAULT_DOCKER_IMAGE = "pollenrobotics/oak-vslam"
 
 # World rotation used when the camera has no IMU (Orbbec Gemini 305). Gravity
-# cannot be measured, so the world is assumed level and the first camera pose's
-# optical frame (right, down, forward) is mapped onto the same Z-up convention
-# the gravity path produces: x = forward = z_opt, y = left = -x_opt,
-# z = up = -y_opt.
-R_FLU_FROM_RDF = np.array([
-    [0.0, 0.0, 1.0],
-    [-1.0, 0.0, 0.0],
+# cannot be measured, so the world is assumed level and rotated by a constant.
+#
+# The raw integrated world is offline_vslam's frame AFTER its empirical
+# R_camera_fix, measured on a Gemini episode as (up, backward, right) — not the
+# optical frame the C++ comment assumes. This matrix maps it to x = forward,
+# y = left, z = up, matching what the gravity path produces:
+#   x = -y_raw, y = -z_raw, z = x_raw
+# It is numerically R_camera_fix itself (offline_vslam.cpp:110): left-
+# multiplying by it undoes the world-frame rotation that the local-frame fix-up
+# induced. With an IMU that rotation is invisible — the gravity align re-derives
+# the world from scratch — which is why only the Gemini showed it.
+R_FLU_FROM_ODOM = np.array([
     [0.0, -1.0, 0.0],
+    [0.0, 0.0, -1.0],
+    [1.0, 0.0, 0.0],
 ])
 
 
@@ -91,8 +98,8 @@ def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFr
          the trajectory's world frame.
       4. Shortest-arc rotation R_align mapping world-gravity to (0,0,-1).
 
-    Without one (Orbbec Gemini 305), R_FLU_FROM_RDF stands in. Skipping the
-    rotation entirely is what left Gemini trajectories in the raw optical frame.
+    Without one (Orbbec Gemini 305), R_FLU_FROM_ODOM stands in. Skipping the
+    rotation entirely is what left Gemini trajectories in the odometry frame.
     """
     valid = traj_df[~traj_df["is_lost"].astype(bool)]
     if len(valid) == 0:
@@ -105,8 +112,8 @@ def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFr
         R_imu_to_cam = np.array(calib["imu_to_cam"])[:3, :3]
     except (FileNotFoundError, KeyError, ValueError) as e:
         print(f"  no IMU gravity ({e}); assuming a level start and applying "
-              "the fixed optical → Z-up world rotation")
-        R_align = Rotation.from_matrix(R_FLU_FROM_RDF)
+              "the fixed Z-up world rotation")
+        R_align = Rotation.from_matrix(R_FLU_FROM_ODOM)
     else:
         # _estimate_gravity_imu returns the median accelerometer vector, which at
         # rest is the SPECIFIC FORCE (points UP, anti-gravity). Negate it to get the

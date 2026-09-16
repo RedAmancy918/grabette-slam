@@ -92,8 +92,8 @@ binary.
 frame-to-frame deltas into absolute poses, rotates the world frame to Z-up
 (x forward, y left, z up) and writes `camera_trajectory.csv`. With an IMU the
 rotation comes from gravity, estimated robustly from the accel stream; on an
-IMU-less camera (Orbbec Gemini 305) it is the fixed optical → Z-up rotation,
-which assumes the camera starts roughly level.
+IMU-less camera (Orbbec Gemini 305) it is a fixed rotation that assumes the
+camera starts roughly level.
 
 ### 2. Validate data and trajectories
 
