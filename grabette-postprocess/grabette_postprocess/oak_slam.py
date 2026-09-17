@@ -17,6 +17,24 @@ from scipy.spatial.transform import Rotation
 
 DEFAULT_DOCKER_IMAGE = "pollenrobotics/oak-vslam"
 
+# World rotation used when the camera has no IMU (Orbbec Gemini 305). Gravity
+# cannot be measured, so the world is assumed level and rotated by a constant.
+#
+# The raw integrated world is offline_vslam's frame AFTER its empirical
+# R_camera_fix, measured on a Gemini episode as (up, backward, right) — not the
+# optical frame the C++ comment assumes. This matrix maps it to x = forward,
+# y = left, z = up, matching what the gravity path produces:
+#   x = -y_raw, y = -z_raw, z = x_raw
+# It is numerically R_camera_fix itself (offline_vslam.cpp:110): left-
+# multiplying by it undoes the world-frame rotation that the local-frame fix-up
+# induced. With an IMU that rotation is invisible — the gravity align re-derives
+# the world from scratch — which is why only the Gemini showed it.
+R_FLU_FROM_ODOM = np.array([
+    [0.0, -1.0, 0.0],
+    [0.0, 0.0, -1.0],
+    [1.0, 0.0, 0.0],
+])
+
 
 @dataclass
 class SlamResult:
@@ -63,23 +81,25 @@ def _estimate_gravity_imu(imu_acc: pd.DataFrame, g_nominal: float = 9.81,
 
 
 def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFrame:
-    """Rotate trajectory so gravity (in WORLD frame) maps to world -Z.
+    """Rotate the trajectory's world frame onto the Z-up output convention.
 
-    rtabmap's IMU init updates the initial pose orientation but does NOT
-    redefine the world axes to be gravity-aligned. We post-process the
-    integrated trajectory so the saved CSV uses a Z-up world. The rotation
-    is a fixed rigid rotation of the world frame — no information is lost
-    and camera-local deltas (which the policy consumes) are preserved
-    exactly.
+    The integrated world frame is the first camera pose's optical frame (right,
+    down, forward): rtabmap's IMU init updates the initial pose orientation but
+    never redefines the world axes, and an IMU-less camera gets no init at all.
+    The rotation applied here is a fixed rigid rotation of the world frame — no
+    information is lost and camera-local deltas (which the policy consumes) are
+    preserved exactly.
 
-    Pipeline:
+    With an IMU (OAK-D), gravity picks the rotation:
       1. Robust gravity estimate from accel: median over samples whose
          magnitude is close to 9.81 m/s² (excludes motion-induced accel).
       2. Transform to optical camera frame via calib's imu_to_cam.
       3. Rotate through the first pose's orientation to get gravity in
          the trajectory's world frame.
-      4. Find shortest-arc rotation R_align that maps world-gravity to (0,0,-1).
-      5. Apply R_align (left-multiply) to all positions and orientations.
+      4. Shortest-arc rotation R_align mapping world-gravity to (0,0,-1).
+
+    Without one (Orbbec Gemini 305), R_FLU_FROM_ODOM stands in. Skipping the
+    rotation entirely is what left Gemini trajectories in the odometry frame.
     """
     valid = traj_df[~traj_df["is_lost"].astype(bool)]
     if len(valid) == 0:
@@ -91,22 +111,23 @@ def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFr
         calib = json.loads((oak_dir / "calib_offline.json").read_text())
         R_imu_to_cam = np.array(calib["imu_to_cam"])[:3, :3]
     except (FileNotFoundError, KeyError, ValueError) as e:
-        print(f"  gravity-align skipped: {e}")
-        return traj_df
+        print(f"  no IMU gravity ({e}); assuming a level start and applying "
+              "the fixed Z-up world rotation")
+        R_align = Rotation.from_matrix(R_FLU_FROM_ODOM)
+    else:
+        # _estimate_gravity_imu returns the median accelerometer vector, which at
+        # rest is the SPECIFIC FORCE (points UP, anti-gravity). Negate it to get the
+        # physical gravity (DOWN) direction, so aligning it to world -Z below yields
+        # a Z-UP world (gravity along -Z) as the docstring intends. Without the
+        # negation the up-vector lands on -Z and the world comes out Z-DOWN.
+        g_cam = -(R_imu_to_cam @ g_imu)
+        g_cam_unit = g_cam / np.linalg.norm(g_cam)
 
-    # _estimate_gravity_imu returns the median accelerometer vector, which at
-    # rest is the SPECIFIC FORCE (points UP, anti-gravity). Negate it to get the
-    # physical gravity (DOWN) direction, so aligning it to world -Z below yields
-    # a Z-UP world (gravity along -Z) as the docstring intends. Without the
-    # negation the up-vector lands on -Z and the world comes out Z-DOWN.
-    g_cam = -(R_imu_to_cam @ g_imu)
-    g_cam_unit = g_cam / np.linalg.norm(g_cam)
+        first_quat = valid[["q_x", "q_y", "q_z", "q_w"]].iloc[0].to_numpy(copy=True)
+        R_world_from_cam0 = Rotation.from_quat(first_quat)
+        g_world_unit = R_world_from_cam0.apply(g_cam_unit)
 
-    first_quat = valid[["q_x", "q_y", "q_z", "q_w"]].iloc[0].to_numpy(copy=True)
-    R_world_from_cam0 = Rotation.from_quat(first_quat)
-    g_world_unit = R_world_from_cam0.apply(g_cam_unit)
-
-    R_align, _ = Rotation.align_vectors([[0.0, 0.0, -1.0]], [g_world_unit])
+        R_align, _ = Rotation.align_vectors([[0.0, 0.0, -1.0]], [g_world_unit])
 
     positions = traj_df[["x", "y", "z"]].to_numpy(copy=True)
     quaternions = traj_df[["q_x", "q_y", "q_z", "q_w"]].to_numpy(copy=True)
