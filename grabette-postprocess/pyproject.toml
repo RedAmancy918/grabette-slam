@@ -11,7 +11,7 @@ dependencies = [
     "click",
     "pandas",
     "tqdm",
-    "lerobot>=0.6.1,<0.7.0",
+    "lerobot[dataset]>=0.6.1,<0.7.0",
 ]
 
 [build-system]
