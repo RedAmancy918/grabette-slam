@@ -186,6 +186,7 @@ def build_dataset(
             key by episode_id instead of the (colliding) role.
     """
     # Lazy import — lerobot is a heavy dependency
+    from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     name_of = recording_name_of or (lambda d: Path(d).name)
@@ -213,7 +214,7 @@ def build_dataset(
         root=root,
         robot_type="grabette",
         use_videos=True,
-        vcodec="h264",  # kept over the libsvtav1 default so the LeRobot web visualizer can play it
+        rgb_encoder=RGBEncoderConfig(vcodec="h264"),
         # Encode frames straight to MP4 as they're added, instead of writing every
         # frame to disk as PNG and re-reading + re-encoding at save_episode(). The
         # PNG round-trip is the main cost of the "building dataset" step on CPU.
@@ -363,6 +364,7 @@ def build_dataset_multi(
     The arms of one recording share a wall clock (synchronized start); we align
     them frame-exactly via each recording's capture_started_utc, using the first
     role as the reference timeline and sampling the others nearest-ts on it."""
+    from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     if fps is None:
@@ -389,7 +391,8 @@ def build_dataset_multi(
 
     dataset = LeRobotDataset.create(
         repo_id=repo_id, fps=int(fps), features=features, root=root,
-        robot_type="grabette", use_videos=True, vcodec="h264",
+        robot_type="grabette", use_videos=True,
+        rgb_encoder=RGBEncoderConfig(vcodec="h264"),
         streaming_encoding=True,
     )
 
