@@ -2,7 +2,7 @@
 name = "grabette-postprocess"
 version = "0.1.0"
 description = "Post-processing for GRABETTE: SLAM orchestration and LeRobot dataset generation"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "scipy",
@@ -11,9 +11,7 @@ dependencies = [
     "click",
     "pandas",
     "tqdm",
-    # Pinned: the build path relies on LeRobotDataset.create(streaming_encoding=).
-    # 0.6.1 fixes uint8 overflow in streaming image statistics.
-    "lerobot==0.6.1 ; python_version >= '3.12'",
+    "lerobot>=0.6.1,<0.7.0",
 ]
 
 [build-system]
