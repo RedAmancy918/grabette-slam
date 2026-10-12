@@ -3,8 +3,8 @@
 Visualize OAK-D RGBD SLAM trajectory using Rerun.
 
 Usage:
-    uv run python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir>
-    uv run python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir> --video-skip 3
+    uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir>
+    uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir> --video-skip 3
 """
 
 import json
@@ -12,14 +12,24 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    import rerun as rr
+    import rerun.blueprint as rrb
+except ImportError:
+    print(
+        "rerun-sdk is required for this script. Install the viz extra, e.g.\n"
+        "  pip install 'grabette-postprocess[viz]'\n"
+        "  uv sync --extra viz",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 from grabette_postprocess.episode_files import resolve
 
 import click
 import cv2
 import numpy as np
 import pandas as pd
-import rerun as rr
-import rerun.blueprint as rrb
 from scipy.spatial.transform import Rotation
 
 
