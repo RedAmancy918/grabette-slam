@@ -23,9 +23,9 @@ TAG_FIXED_GRIPPER = "fixed_gripper"
 TAG_TRACKING_LOST = "tracking_lost"
 TAG_TRAJ_WITH_JUMPS = "traj_with_jumps"
 
-# Tracked-frame percentage below which SLAM effectively lost the camera over much
-# of the episode (matches the "Low tracking" trajectory warning threshold).
-TRACKING_LOST_PCT = 50.0
+# Tracked-frame percentage below which SLAM lost the camera over too much of the
+# episode (matches the "Low tracking" trajectory warning threshold).
+TRACKING_LOST_PCT = 80.0
 
 # A trajectory riddled with large relocalization jumps — mirrors the two
 # jump-based trajectory checks (see checks.trajectory.check_trajectory):

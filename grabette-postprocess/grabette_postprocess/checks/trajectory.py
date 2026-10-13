@@ -153,6 +153,8 @@ def check_trajectory(
 
     # Tracking rate
     if report.tracking_pct < 50:
+        report.errors.append(f"Very low tracking: {report.tracking_pct:.1f}%")
+    elif report.tracking_pct < 80:
         report.warnings.append(f"Low tracking: {report.tracking_pct:.1f}%")
 
     # Verdict
