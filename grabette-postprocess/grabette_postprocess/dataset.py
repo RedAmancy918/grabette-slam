@@ -192,7 +192,7 @@ def build_dataset(
     name_of = recording_name_of or (lambda d: Path(d).name)
 
     if fps is None:
-        fps = 50.0
+        fps = 30.0
         print(f"Using default fps: {int(fps)}")
 
     # Build feature schema
@@ -368,7 +368,7 @@ def build_dataset_multi(
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     if fps is None:
-        fps = 50.0
+        fps = 30.0
         print(f"Using default fps: {int(fps)}")
     h, w = image_size
 
