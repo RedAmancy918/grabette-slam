@@ -18,8 +18,8 @@ from grabette_postprocess.checks.tags import episode_tags
               help="Dataset identifier (e.g. '<user>/<dataset>')")
 @click.option("--task", required=True,
               help="Task description (e.g. 'cup manipulation')")
-@click.option("--fps", type=float, default=None,
-              help="Video frame rate (default: 50fps, native RPi camera rate)")
+@click.option("--fps", type=float, default=30.0,
+              help="Video frame rate (default: 30fps)")
 @click.option("--image_height", type=int, default=720)
 @click.option("--image_width", type=int, default=960)
 @click.option("--root", type=click.Path(), default=None,
