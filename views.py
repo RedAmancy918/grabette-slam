@@ -280,7 +280,7 @@ def episode_issues(it: dict) -> list[tuple[str, str]]:
     elif it["n_jumps"] > it["n_tracked"] * 0.1:
         out.append((f"{it['n_jumps']} jumps > 50 mm",
                     "Abrupt position jumps — unstable tracking."))
-    if it["tracking_pct"] < 80:
+    if it["tracking_pct"] < 75:
         out.append((f"tracking {it['tracking_pct']:.0f}%",
                     "SLAM lost the camera over part of the episode."))
     if not out:

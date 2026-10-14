@@ -25,7 +25,7 @@ TAG_TRAJ_WITH_JUMPS = "traj_with_jumps"
 
 # Tracked-frame percentage below which SLAM lost the camera over too much of the
 # episode (matches the "Low tracking" trajectory warning threshold).
-TRACKING_LOST_PCT = 80.0
+TRACKING_LOST_PCT = 75.0
 
 # A trajectory riddled with large relocalization jumps — mirrors the two
 # jump-based trajectory checks (see checks.trajectory.check_trajectory):
