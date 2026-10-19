@@ -38,13 +38,20 @@ LeRobot v3 dataset/
 
 ## Setup
 
-Requires Python >= 3.11 and [uv](https://docs.astral.sh/uv/).
+Requires Python >= 3.12 (LeRobot 0.6's minimum) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync
+uv sync                  # add --extra viz for the Rerun visualizer
 ```
 
-The OAK SLAM step requires Docker with a locally built image:
+The OAK SLAM step requires Docker. The image is published, so pull it:
+
+```bash
+docker pull pollenrobotics/oak-vslam
+```
+
+Pin `:2026-07-22` instead of `:latest` when a result has to stay comparable.
+To build it yourself (Dockerfile + `offline_vslam.cpp` are both in the repo):
 
 ```bash
 docker build -t pollenrobotics/oak-vslam docker/oak_vslam/
@@ -52,31 +59,46 @@ docker build -t pollenrobotics/oak-vslam docker/oak_vslam/
 
 ## Quick start
 
+The pipeline expects `-i` to point at a **dataset directory** containing one or
+more episode subdirectories (`<dataset>/<episode>/…`), except for the
+per-episode scripts (`convert_episode_to_oak.py`, `run_oak_slam.py`,
+`visualize_rgbd_trajectory.py`) which take a **single episode directory**.
+
 ```bash
-# 1. Convert the compact recording into the per-file oak/ layout the C++ expects
+# 1. Sanity-check the recording (no Docker, fast) — sample counts, file inventory
+uv run python scripts/checks/check_dataset.py -i ~/data/dataset
+
+# 2. Convert the compact recording into the per-file oak/ layout the C++ expects
 uv run python scripts/pipeline/convert_episode_to_oak.py -i ~/data/dataset/episode
 
-# 2. Run offline RTAB-Map VSLAM → camera_trajectory.csv
+# 3. Run offline RTAB-Map VSLAM → camera_trajectory.csv
 uv run python scripts/pipeline/run_oak_slam.py -i ~/data/dataset/episode
 
-# 3. Validate trajectories
-uv run python scripts/checks/check_trajectory.py -i ~/data/dataset
+# 4. Validate trajectories (drift, relocalization jumps, motion realism)
+uv run python scripts/checks/check_trajectory.py -i ~/data/dataset -v
 
-# 4. Generate LeRobot dataset
+# 5. Generate LeRobot dataset
 uv run python scripts/pipeline/generate_dataset.py \
   -i ~/data/dataset \
   --repo_id user/dataset-name \
   --task "task description" \
   --root ~/lerobot_datasets
 
-# 5. Visualize a trajectory
-uv run python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
+# 6. Visualize the SLAM trajectory in Rerun (3D poses + camera + IMU)
+uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
 
-# 6. Push to HuggingFace Hub
+# 7. Visualize the generated LeRobot dataset (action + video, episode-by-episode)
+uv run lerobot-dataset-viz \
+  --repo-id user/dataset-name --root ~/lerobot_datasets --episode-index 0
+
+# 8. Push to HuggingFace Hub
 uv run python scripts/pipeline/push_to_hub.py \
   --repo_id user/dataset-name \
   --root ~/lerobot_datasets
 ```
+
+`--repo_id` accepts any `owner/name` string; for local-only runs the owner half
+doesn't need to correspond to a real HF account until you actually push (step 8).
 
 ## Usage details
 
@@ -106,6 +128,14 @@ uv run python scripts/checks/check_sync.py -i ~/data/dataset/episode --plot sync
 
 # Trajectory quality: drift, relocalization jumps, zigzagging, unrealistic motion
 uv run python scripts/checks/check_trajectory.py -i ~/data/dataset -v
+
+# Compare two trajectories of the same episode (e.g. an ablation vs. a rerun)
+uv run python scripts/checks/compare_trajectories.py \
+  -a ep/camera_trajectory.csv -b ep/camera_trajectory_noimu.csv
+
+# Export to TUM format (for evo), and zero the first timestamp to compare clocks
+uv run python scripts/checks/csv_to_tum.py ep/camera_trajectory.csv -o offline.tum
+uv run python scripts/checks/normalize_tum.py offline.tum --in-place
 ```
 
 ### 3. Generate LeRobot dataset
@@ -147,8 +177,17 @@ Interactive 3D visualization with [Rerun](https://rerun.io/): the SLAM
 trajectory, the OAK-left camera feed, and IMU time series.
 
 ```bash
-uv run python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
+uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
 ```
+
+## Tests
+
+```bash
+uv run --extra test pytest
+```
+
+No Docker or SLAM binary needed. CI (`.github/workflows/tests.yml`) runs the
+same suite against the locked versions, CPU torch.
 
 ## Project structure
 
@@ -164,6 +203,7 @@ grabette-postprocess/
 │   └── checks/             # validation logic (recording, sync, trajectory)
 ├── docker/
 │   └── oak_vslam/       # RTAB-Map offline_vslam C++ + Dockerfile
+├── tests/               # unit tests (pytest)
 └── scripts/                           # local CLIs (mirror the post-processing pipeline)
     ├── pipeline/                       # the pipeline stages, in order
     │   ├── convert_episode_to_oak.py   # recording → oak/ layout
@@ -173,7 +213,10 @@ grabette-postprocess/
     ├── checks/                         # validation / QA
     │   ├── check_dataset.py            # dataset health check
     │   ├── check_sync.py               # camera-IMU synchronization check
-    │   └── check_trajectory.py         # trajectory quality validation
+    │   ├── check_trajectory.py         # trajectory quality validation
+    │   ├── compare_trajectories.py     # diff two trajectories of one episode
+    │   ├── csv_to_tum.py               # camera_trajectory.csv → TUM (for evo)
+    │   └── normalize_tum.py            # shift a TUM trajectory to start at t=0
     └── visualize/
         └── visualize_rgbd_trajectory.py  # Rerun 3D visualization
 ```
