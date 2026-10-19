@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  postprocess:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: grabette-postprocess
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install FFmpeg
+        # lerobot[dataset]'s video path uses torchcodec, which dlopens the system
+        # FFmpeg libraries at runtime. A bare ubuntu-latest runner has none, so
+        # build_dataset fails at video encode.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install the locked environment (CPU torch)
+        # Exact versions from uv.lock, so CI tests what the lock pins. A plain
+        # `uv sync` would pull the CUDA torch wheel (~2.5 GB); the tests use no
+        # GPU, so torch comes from the CPU index instead (~200 MB).
+        run: |
+          uv export --frozen --extra test --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          uv venv --python 3.12
+          uv pip install --torch-backend=cpu -r "$RUNNER_TEMP/requirements.txt"
+          uv pip install --no-deps -e .
+
+      - name: Unit tests
+        # Pure-Python checks plus the lerobot boundary: API-surface tripwires
+        # (test_lerobot_api.py) and a synthetic build_dataset round-trip.
+        # No Docker / SLAM binary needed.
+        run: .venv/bin/python -m pytest -q
