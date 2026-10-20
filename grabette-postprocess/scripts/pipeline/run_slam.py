@@ -4,13 +4,13 @@
 import click
 from pathlib import Path
 
-from grabette_postprocess.oak_slam import run_oak_slam, DEFAULT_DOCKER_IMAGE
+from grabette_postprocess.slam import run_slam, DEFAULT_DOCKER_IMAGE
 
 
 @click.command()
 @click.option("-i", "--input_dir", required=True, multiple=True,
               type=click.Path(exists=True),
-              help="Episode directory containing oak/ (repeatable for batch)")
+              help="Episode directory containing slam_input/ (repeatable for batch)")
 @click.option("-d", "--docker_image", default=DEFAULT_DOCKER_IMAGE, show_default=True,
               help="Docker image name")
 @click.option("--output_csv", default="camera_trajectory.csv", show_default=True,
@@ -18,14 +18,14 @@ from grabette_postprocess.oak_slam import run_oak_slam, DEFAULT_DOCKER_IMAGE
 def main(input_dir, docker_image, output_csv):
     """Run offline RGB-D VSLAM on episode directories.
 
-    Each directory must contain an oak/ subdirectory with:
+    Each directory must contain a slam_input/ subdirectory with:
     calib_offline.json, timestamps.csv, imu_acc.csv, imu_gyro.csv,
     frames/*.png, depth/*.png
 
     By default the binary runs in Docker. The image is published:
-        docker pull pollenrobotics/oak-vslam
+        docker pull pollenrobotics/grabette-vslam
     or build it locally with:
-        docker build -t pollenrobotics/oak-vslam docker/oak_vslam/
+        docker build -t pollenrobotics/grabette-vslam docker/vslam/
 
     Produces <episode_dir>/camera_trajectory.csv (absolute poses) compatible
     with generate_dataset.py.
@@ -35,7 +35,7 @@ def main(input_dir, docker_image, output_csv):
     for d in input_dir:
         ep_dir = Path(d).expanduser().absolute()
         try:
-            result = run_oak_slam(
+            result = run_slam(
                 ep_dir,
                 docker_image=docker_image,
                 output_csv=output_csv,

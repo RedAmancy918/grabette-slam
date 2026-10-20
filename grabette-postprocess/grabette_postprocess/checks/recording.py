@@ -87,7 +87,7 @@ def _check_arducam(ep_dir: Path, status: dict) -> None:
     _check_video(ep_dir / "raw_video.mp4", "arducam", status, required=True)
 
 
-def _check_oak_cameras(ep_dir: Path, require_right: bool, status: dict) -> None:
+def _check_dcam_cameras(ep_dir: Path, require_right: bool, status: dict) -> None:
     """Depth-camera left video + its timestamps (SLAM inputs). The right camera is not a
     SLAM/dataset input, so it's only checked (non-fatally) when require_right."""
     _check_video(resolve(ep_dir, "dcam_left.mp4"), "dcam_left", status, required=True)
@@ -315,7 +315,7 @@ def check_recording(ep_dir: Path, require_right: bool | None = None) -> dict:
         require_right = _expects_right_stream(ep_dir)
 
     _check_arducam(ep_dir, status)
-    _check_oak_cameras(ep_dir, require_right, status)
+    _check_dcam_cameras(ep_dir, require_right, status)
     _check_depth(ep_dir, status)
     _check_seq_overlap(ep_dir, status)
     _check_imu(ep_dir, status)

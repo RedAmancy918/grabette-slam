@@ -1,5 +1,5 @@
 # grabette-slam → LeRobot Space image, built on pollen's pre-built SLAM base
-# (pollenrobotics/oak-vslam), which supplies the RTAB-Map libraries and the C++
+# (pollenrobotics/grabette-vslam), which supplies the RTAB-Map libraries and the C++
 # toolchain. This keeps the ~10 min from-source RTAB-Map compile out of every
 # Space build — we add the Python 3.12 conversion app, and recompile
 # offline_vslam, on top.
@@ -12,7 +12,7 @@
 # aborted (SIGABRT, surfacing as rc=-6) in a Space whose source had the fix.
 # Compiling from the deployed tree costs ~10 s and makes the binary match the
 # source by construction.
-FROM pollenrobotics/oak-vslam
+FROM pollenrobotics/grabette-vslam
 
 USER root
 # offline_vslam is compiled to this path below; the app calls it as a subprocess.
@@ -33,12 +33,12 @@ RUN apt-get update \
 COPY grabette-postprocess /opt/grabette-postprocess
 
 # Rebuild offline_vslam from the tree above, overwriting the base image's binary.
-# Same flags as grabette-postprocess/docker/oak_vslam/Dockerfile, which builds
+# Same flags as grabette-postprocess/docker/vslam/Dockerfile, which builds
 # the base: the -dev packages, RTAB-Map headers and libs they need are all still
 # present there. Before the slow pip layer, so a compile error surfaces at once.
 RUN RTABMAP_INCLUDE=$(find /usr/local/include -maxdepth 1 -name "rtabmap*" -type d | head -1) \
  && PCL_INCLUDE=$(find /usr/include -maxdepth 1 -name "pcl*" -type d | head -1) \
- && g++ -std=c++17 -O2 /opt/grabette-postprocess/docker/oak_vslam/offline_vslam.cpp \
+ && g++ -std=c++17 -O2 /opt/grabette-postprocess/docker/vslam/offline_vslam.cpp \
         -o /usr/local/bin/offline_vslam \
         -I${RTABMAP_INCLUDE} \
         -I${PCL_INCLUDE} \

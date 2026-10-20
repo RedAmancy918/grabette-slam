@@ -1,4 +1,4 @@
-"""OAK-D SR offline VSLAM (pollenrobotics/oak-vslam).
+"""Depth-camera offline VSLAM (pollenrobotics/grabette-vslam).
 
 By default the C++ offline_vslam binary runs inside Docker. When the binary is
 already present on the host (e.g. inside a HuggingFace Space image that bundles
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
-DEFAULT_DOCKER_IMAGE = "pollenrobotics/oak-vslam"
+DEFAULT_DOCKER_IMAGE = "pollenrobotics/grabette-vslam"
 
 # World rotation used when the camera has no IMU (Orbbec Gemini 305). Gravity
 # cannot be measured, so the world is assumed level and rotated by a constant.
@@ -80,7 +80,7 @@ def _estimate_gravity_imu(imu_acc: pd.DataFrame, g_nominal: float = 9.81,
     return np.median(filtered, axis=0)
 
 
-def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFrame:
+def _gravity_align_trajectory(traj_df: pd.DataFrame, slam_dir: Path) -> pd.DataFrame:
     """Rotate the trajectory's world frame onto the Z-up output convention.
 
     The integrated world frame is the first camera pose's optical frame (right,
@@ -106,13 +106,19 @@ def _gravity_align_trajectory(traj_df: pd.DataFrame, oak_dir: Path) -> pd.DataFr
         return traj_df
 
     try:
-        imu_acc = pd.read_csv(oak_dir / "imu_acc.csv")
+        imu_acc = pd.read_csv(slam_dir / "imu_acc.csv")
         g_imu = _estimate_gravity_imu(imu_acc)
-        calib = json.loads((oak_dir / "calib_offline.json").read_text())
+        calib = json.loads((slam_dir / "calib_offline.json").read_text())
         R_imu_to_cam = np.array(calib["imu_to_cam"])[:3, :3]
     except (FileNotFoundError, KeyError, ValueError) as e:
-        print(f"  no IMU gravity ({e}); assuming a level start and applying "
-              "the fixed Z-up world rotation")
+        # No imu_acc.csv is the normal IMU-less case (convert writes no IMU CSVs);
+        # any other failure is a real problem, so keep its error in the log.
+        if not (slam_dir / "imu_acc.csv").exists():
+            print("  no IMU (IMU-less camera): assuming a level start and applying "
+                  "the fixed Z-up world rotation")
+        else:
+            print(f"  no IMU gravity ({e}); assuming a level start and applying "
+                  "the fixed Z-up world rotation")
         R_align = Rotation.from_matrix(R_FLU_FROM_ODOM)
     else:
         # _estimate_gravity_imu returns the median accelerometer vector, which at
@@ -184,24 +190,24 @@ def _integrate_deltas(delta_df: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def _slam_command(oak_dir: Path, *, docker_image: str, binary: str | None) -> list[str]:
+def _slam_command(slam_dir: Path, *, docker_image: str, binary: str | None) -> list[str]:
     """Build the offline_vslam invocation.
 
     With `binary`, call it directly on the host (e.g. inside a Space image that
-    bundles it). Otherwise run it in Docker, mounting oak_dir at /data.
+    bundles it). Otherwise run it in Docker, mounting slam_dir at /data.
     """
-    poses_path = oak_dir / "poses.csv"
+    poses_path = slam_dir / "poses.csv"
     if binary:
-        return [binary, str(oak_dir), str(poses_path)]
+        return [binary, str(slam_dir), str(poses_path)]
     return [
         "docker", "run", "--rm",
-        "--volume", f"{oak_dir}:/data",
+        "--volume", f"{slam_dir}:/data",
         docker_image,
         "/data", "/data/poses.csv",
     ]
 
 
-def run_oak_slam(
+def run_slam(
     episode_dir: Path,
     *,
     docker_image: str = DEFAULT_DOCKER_IMAGE,
@@ -209,17 +215,17 @@ def run_oak_slam(
     output_csv: str = "camera_trajectory.csv",
     show_progress: bool = True,
 ) -> SlamResult:
-    """Run offline_vslam on the oak/ subdir of an episode directory.
+    """Run offline_vslam on the slam_input/ subdir of an episode directory.
 
     Produces <episode_dir>/<output_csv> with absolute poses in the standard
     trajectory format (frame_idx, timestamp, state, is_lost, is_keyframe,
     x, y, z, q_x, q_y, q_z, q_w).
 
     By default the binary runs in Docker; the image must be built once with:
-        docker build -t pollenrobotics/oak-vslam docker/oak_vslam/
+        docker build -t pollenrobotics/grabette-vslam docker/vslam/
 
     Args:
-        episode_dir: directory containing oak/ with frames, depth, IMU CSVs, calib
+        episode_dir: directory containing slam_input/ with frames, depth, IMU CSVs, calib
         docker_image: Docker image name (ignored when `binary` is set)
         binary: path to a host offline_vslam binary; if set, run it directly
             instead of via Docker (Docker-in-Docker is unavailable in Spaces)
@@ -230,18 +236,18 @@ def run_oak_slam(
         SlamResult with tracking statistics
     """
     episode_dir = Path(episode_dir).absolute()
-    oak_dir = episode_dir / "oak"
+    slam_dir = episode_dir / "slam_input"
 
-    if not oak_dir.is_dir():
-        raise FileNotFoundError(f"No oak/ subdir in {episode_dir}")
+    if not slam_dir.is_dir():
+        raise FileNotFoundError(f"No slam_input/ subdir in {episode_dir}")
 
-    poses_path = oak_dir / "poses.csv"
-    cmd = _slam_command(oak_dir, docker_image=docker_image, binary=binary)
+    poses_path = slam_dir / "poses.csv"
+    cmd = _slam_command(slam_dir, docker_image=docker_image, binary=binary)
 
     if show_progress:
-        print(f"Running OAK SLAM on {episode_dir.name}...")
+        print(f"Running SLAM on {episode_dir.name}...")
 
-    log_path = episode_dir / "oak_slam_stdout.txt"
+    log_path = episode_dir / "slam_stdout.txt"
     returncode = -1
     try:
         with open(log_path, "w") as f_log:
@@ -254,20 +260,20 @@ def run_oak_slam(
             )
         returncode = proc.returncode
     except Exception as e:
-        print(f"  OAK SLAM error: {e}")
+        print(f"  SLAM error: {e}")
         return SlamResult(
             returncode=-1, total_frames=0, tracked_frames=0, trajectory_path=None
         )
 
     if not poses_path.is_file():
-        print(f"  OAK SLAM produced no poses.csv (rc={returncode})")
+        print(f"  SLAM produced no poses.csv (rc={returncode})")
         return SlamResult(
             returncode=returncode, total_frames=0, tracked_frames=0, trajectory_path=None
         )
 
     delta_df = pd.read_csv(poses_path)
     abs_df = _integrate_deltas(delta_df)
-    abs_df = _gravity_align_trajectory(abs_df, oak_dir)
+    abs_df = _gravity_align_trajectory(abs_df, slam_dir)
 
     traj_path = episode_dir / output_csv
     abs_df.to_csv(traj_path, index=False)

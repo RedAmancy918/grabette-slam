@@ -4,7 +4,7 @@ All checks cross-correlate two motion signals resampled to a common grid; the
 lag of the correlation peak is the timing offset between the two streams. Three
 checks, each answering a different alignment question:
 
-  1. check_oak_imu          — depth-camera left stream ↔ its gyro (SLAM VIO health).
+  1. check_dcam_imu          — depth-camera left stream ↔ its gyro (SLAM VIO health).
      Same device, shared device clock (device_us). Cameras with an IMU only. Confirms the visual-inertial
      SLAM *inputs* are time-aligned. A prerequisite for trusting the trajectory.
 
@@ -109,7 +109,7 @@ def compute_optical_flow_magnitude(
     return np.array(timestamps), np.array(flow_mags)
 
 
-def load_oak_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_dcam_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Load the depth camera's gyroscope and return (timestamps_s, angular_velocity_norm).
 
     Reads dcam_imu.json (flat schema, kind == "gyro"). Timestamps use the camera's
@@ -129,9 +129,9 @@ def load_oak_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return ts, norms
 
 
-def oak_left_frame_ts(episode_dir: Path) -> np.ndarray | None:
+def dcam_left_frame_ts(episode_dir: Path) -> np.ndarray | None:
     """Per-frame device_us timestamps (seconds) for dcam_left.mp4 — the depth
-    camera's hardware clock, matching the gyro from load_oak_gyro_norm. Falls back to
+    camera's hardware clock, matching the gyro from load_dcam_gyro_norm. Falls back to
     host_ms when device_us is absent. None when the file is missing."""
     ts_path = resolve(episode_dir, "dcam_left_timestamps.json")
     if not ts_path.is_file():
@@ -312,7 +312,7 @@ def _result(label: str, ref_label: str, cam_ts, cam_sig, ref_ts, ref_sig,
     }
 
 
-def check_oak_imu(episode_dir: Path, max_frames: int = 300) -> dict | None:
+def check_dcam_imu(episode_dir: Path, max_frames: int = 300) -> dict | None:
     """Depth-camera left stream ↔ its gyro (SLAM VIO health). None when inputs
     missing, which includes IMU-less cameras (Gemini 305)."""
     episode_dir = Path(episode_dir)
@@ -321,10 +321,10 @@ def check_oak_imu(episode_dir: Path, max_frames: int = 300) -> dict | None:
     if not video.is_file() or not imu.is_file():
         return None
     try:
-        gyro_ts, gyro_norm = load_oak_gyro_norm(imu)
+        gyro_ts, gyro_norm = load_dcam_gyro_norm(imu)
     except (ValueError, KeyError):
         return None
-    frame_ts = oak_left_frame_ts(episode_dir)
+    frame_ts = dcam_left_frame_ts(episode_dir)
     flow_ts, flow_mag = compute_optical_flow_magnitude(video, frame_ts, max_frames)
     return _result("depth-cam left ↔ gyro (SLAM VIO health)", "depth-cam gyro",
                    flow_ts, flow_mag, gyro_ts, gyro_norm, approx=frame_ts is None)
