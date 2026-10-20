@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check temporal alignment for the OAK + Arducam rig.
+Check temporal alignment for the depth camera + Arducam rig.
 
 Each check cross-correlates two motion signals; the lag of the correlation peak
 is the timing offset. Two checks run by default, both off a single (shared)
@@ -18,8 +18,8 @@ Arducam optical-flow pass:
 
 Opt-in (--vio-health), a second/slower optical-flow pass:
 
-  3. OAK-left ↔ OAK-gyro      (SLAM VIO health)
-     Same device, shared OAK clock. Confirms the visual-inertial SLAM inputs are
+  3. depth-cam left ↔ gyro   (SLAM VIO health; cameras with an IMU)
+     Same device, shared device clock. Confirms the visual-inertial SLAM inputs are
      time-aligned. Largely subsumed by check 1 (a bad trajectory shows up there),
      so it is a debugging aid rather than a default.
 
@@ -62,7 +62,7 @@ def _report(res: dict) -> None:
               help="Max consecutive video frames per camera (default: 300 ≈ first ~6s). "
                    "Raise it for the gripper check on long episodes so later gestures aren't cut off.")
 @click.option("--vio-health", is_flag=True, default=False,
-              help="Also check OAK-left↔gyro (SLAM-input health) — a second, slower optical-flow pass")
+              help="Also check depth-cam left↔gyro (SLAM-input health) — a second, slower optical-flow pass")
 @click.option("--plot", "-p", type=click.Path(), default=None, help="Save a correlation plot (PNG)")
 def main(episode_dir, max_frames, vio_health, plot):
     """Check temporal alignment via optical-flow cross-correlation."""
@@ -70,7 +70,7 @@ def main(episode_dir, max_frames, vio_health, plot):
 
     # The two checks that matter for the dataset (image↔pose, angle sync) share a
     # single Arducam optical-flow pass — the expensive Farneback part. The
-    # OAK-left↔gyro SLAM-input check needs its own second flow pass and is largely
+    # depth-cam left↔gyro SLAM-input check needs its own second flow pass and is largely
     # subsumed by image↔trajectory, so it is opt-in (--vio-health).
     print("Computing Arducam optical flow (raw_video.mp4)...")
     arducam_flow = _arducam_flow(episode_dir, max_frames)
@@ -85,7 +85,7 @@ def main(episode_dir, max_frames, vio_health, plot):
     ]
     if vio_health:
         print("Computing depth-camera left optical flow (dcam_left.mp4)...")
-        checks.append(("OAK-left ↔ OAK-gyro", lambda: check_oak_imu(episode_dir, max_frames)))
+        checks.append(("depth-cam left ↔ gyro", lambda: check_oak_imu(episode_dir, max_frames)))
 
     results = []
     for name, run in checks:
@@ -121,7 +121,7 @@ def _save_plot(path, results):
             m = np.max(x)
             return x / m if m > 0 else x
         ax = axes[row][0]
-        ax.plot(r["cam_ts"], norm(r["cam_sig"]), label="Arducam/OAK flow", alpha=0.8)
+        ax.plot(r["cam_ts"], norm(r["cam_sig"]), label="Arducam/depth-cam flow", alpha=0.8)
         ax.plot(r["ref_ts"], norm(r["ref_sig"]), label=r["ref_label"], alpha=0.8)
         ax.set_title(f"{r['label']} — signals")
         ax.set_xlabel("time (s)"); ax.legend()

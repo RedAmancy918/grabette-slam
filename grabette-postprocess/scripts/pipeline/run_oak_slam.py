@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run OAK-D SR offline VSLAM on one or more episode directories."""
+"""Run offline RGB-D VSLAM on one or more episode directories."""
 
 import click
 from pathlib import Path
@@ -16,7 +16,7 @@ from grabette_postprocess.oak_slam import run_oak_slam, DEFAULT_DOCKER_IMAGE
 @click.option("--output_csv", default="camera_trajectory.csv", show_default=True,
               help="Output trajectory filename inside each episode directory")
 def main(input_dir, docker_image, output_csv):
-    """Run offline OAK-D VSLAM on episode directories.
+    """Run offline RGB-D VSLAM on episode directories.
 
     Each directory must contain an oak/ subdirectory with:
     calib_offline.json, timestamps.csv, imu_acc.csv, imu_gyro.csv,

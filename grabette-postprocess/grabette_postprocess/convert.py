@@ -24,7 +24,7 @@ in encoding order (= seq order); we trim to whichever stream is shortest.
 Timestamps in the output CSVs are in nanoseconds. Camera frames keep their
 host_ms stamps — the clock the SLAM trajectory (and the downstream Arducam
 alignment in dataset.py) lives on. IMU samples are placed on that same host
-timeline via an affine fit of the OAK device clock → host clock (see
+timeline via an affine fit of the depth camera's device clock → host clock (see
 fit_device_to_host_s): the IMU shares the cameras' device clock, so mapping it
 through the *frame* stream removes the ~tens-of-ms false camera-IMU offset that
 using the IMU stream's own (differently-buffered over USB) host_ms injects.
@@ -46,10 +46,10 @@ def _ms_to_ns(ms: float) -> int:
 
 
 def fit_device_to_host_s(left_ts_samples: list) -> tuple[float, float] | None:
-    """Least-squares affine (slope, intercept) mapping the OAK device clock to
+    """Least-squares affine (slope, intercept) mapping the depth camera's device clock to
     the host clock, both in seconds: ``host_s ≈ slope * device_s + intercept``.
 
-    Fitted on the OAK left frame stream (dcam_left_timestamps.json), which
+    Fitted on the depth camera's left frame stream (dcam_left_timestamps.json), which
     carries both ``device_us`` and ``host_ms`` per frame. Used to place the IMU
     — which shares the cameras' device clock — onto the frame host timeline
     instead of trusting the IMU stream's own host_ms (whose USB-transfer latency

@@ -2,21 +2,22 @@
 
 SLAM/VIO orchestration and LeRobot dataset generation for the GRABETTE project.
 
-Takes raw episode recordings (OAK-D stereo + depth + IMU) from
-[Grabette](https://github.com/pollen-robotics/grabette), runs offline visual-inertial
-SLAM to produce a camera trajectory, and converts everything into a
+Takes raw episode recordings (depth camera: image + depth, plus IMU when the
+camera has one) from [Grabette](https://github.com/pollen-robotics/grabette), runs
+offline RGB-D SLAM to produce a camera trajectory, and converts everything into a
 [LeRobot v3](https://huggingface.co/docs/lerobot) dataset (Parquet + MP4) ready
 for policy training.
 
-Trajectories are produced by **OAK-D offline VSLAM** — RTAB-Map RGBD-inertial
-odometry, run in Docker.
+Trajectories are produced by **offline RGB-D VSLAM** — RTAB-Map odometry,
+visual-inertial when the camera has an IMU (OAK-D SR) and visual-only otherwise
+(Orbbec Gemini 305), run in Docker.
 
 
 ## Data flow
 
 ```
 Episode directory (from Grabette)
-├── dcam_left.mp4 + dcam_depth.mkv        OAK-D stereo + depth
+├── dcam_left.mp4 + dcam_depth.mkv        depth camera: left image + depth
 ├── dcam_*_timestamps.json             frame timestamps
 ├── dcam_imu.json                      accel/gyro/rotation
 ├── dcam_calib_offline.json            intrinsics + imu_to_cam
@@ -44,7 +45,7 @@ Requires Python >= 3.12 (LeRobot 0.6's minimum) and [uv](https://docs.astral.sh/
 uv sync                  # add --extra viz for the Rerun visualizer
 ```
 
-The OAK SLAM step requires Docker. The image is published, so pull it:
+The SLAM step requires Docker. The image is published, so pull it:
 
 ```bash
 docker pull pollenrobotics/oak-vslam
@@ -102,9 +103,9 @@ doesn't need to correspond to a real HF account until you actually push (step 8)
 
 ## Usage details
 
-### 1. Trajectory extraction (OAK-D SLAM, RTAB-Map)
+### 1. Trajectory extraction (RGB-D SLAM, RTAB-Map)
 
-The recording (`grabette/hardware/oakd.py`) stores compact mp4 + JSON sidecars.
+The recording (grabette's `hardware/orbbec.py` or `hardware/oakd.py`) stores compact mp4 + JSON sidecars.
 `convert_episode_to_oak.py` expands these into the `oak/` layout
 (`frames/`, `depth/`, `timestamps.csv`, `imu_acc.csv`, `imu_gyro.csv`,
 `imu_rotation.csv`, `calib_offline.json`) consumed by the C++ `offline_vslam`
@@ -174,7 +175,7 @@ uv run python scripts/pipeline/push_to_hub.py \
 ### 5. Visualize trajectory
 
 Interactive 3D visualization with [Rerun](https://rerun.io/): the SLAM
-trajectory, the OAK-left camera feed, and IMU time series.
+trajectory, the depth camera's left feed, and IMU time series (when recorded).
 
 ```bash
 uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i ~/data/dataset/episode
@@ -197,7 +198,7 @@ grabette-postprocess/
 ├── grabette_postprocess/
 │   ├── trajectory.py       # CSV parsing, quaternion→axis-angle, ANGL interpolation
 │   ├── convert.py          # recording → oak/ layout expansion
-│   ├── oak_slam.py         # OAK-D RTAB-Map orchestration (delta integration + gravity align)
+│   ├── oak_slam.py         # RTAB-Map orchestration (delta integration + Z-up world align)
 │   ├── dataset.py          # LeRobot v3 dataset builder
 │   ├── episode_manager.py  # episode discovery / dropping
 │   └── checks/             # validation logic (recording, sync, trajectory)
@@ -207,7 +208,7 @@ grabette-postprocess/
 └── scripts/                           # local CLIs (mirror the post-processing pipeline)
     ├── pipeline/                       # the pipeline stages, in order
     │   ├── convert_episode_to_oak.py   # recording → oak/ layout
-    │   ├── run_oak_slam.py             # offline OAK-D VSLAM → camera_trajectory.csv
+    │   ├── run_oak_slam.py             # offline RGB-D VSLAM → camera_trajectory.csv
     │   ├── generate_dataset.py         # trajectories → LeRobot v3
     │   └── push_to_hub.py              # upload dataset to Hugging Face Hub
     ├── checks/                         # validation / QA
@@ -223,7 +224,8 @@ grabette-postprocess/
 
 ## Hardware
 
-- **Camera/depth**: OAK-D SR (stereo + on-board depth)
-- **IMU**: BNO086 (accel + gyro + fused rotation)
+- **Depth camera**: Orbbec Gemini 305 (default; image + depth, no IMU) or Luxonis
+  OAK-D SR (stereo + on-board depth, BNO086 IMU: accel + gyro + fused rotation)
+- **Fisheye camera**: RPi camera (Arducam), the dataset's `cam0`
 - **Angle sensors**: two joint encoders (proximal + distal)
 ```

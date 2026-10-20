@@ -1,7 +1,7 @@
 """Episode validation checks, one module per stage of the pipeline:
 
 - recording  : completeness/health of the raw recording (before SLAM)
-- sync       : camera ↔ OAK-IMU time alignment (before SLAM)
+- sync       : camera ↔ depth-camera IMU time alignment (before SLAM)
 - trajectory : SLAM odometry quality (after SLAM)
 
 Each module is self-contained and imported on demand (they pull heavy deps —
