@@ -75,13 +75,25 @@ def test_unrealistic_speed_flagged(tmp_path):
 
 
 def test_low_tracking_warns(tmp_path):
-    # 4/10 tracked (40% < 50), tiny steps -> WARN, no errors.
+    # 6/10 tracked (50 <= 60% < 75), tiny steps -> WARN, no errors.
+    xyz = np.zeros((10, 3))
+    xyz[:, 0] = np.arange(10) * 0.003
+    is_lost = [0, 1, 0, 0, 1, 0, 0, 1, 1, 0]
+    r = check_trajectory(_write_traj(
+        tmp_path / "camera_trajectory.csv", xyz, np.linspace(0, 1.0, 10), is_lost))
+    assert r.tracking_pct == 60.0
+    assert r.verdict == "WARN"
+    assert any("tracking" in w.lower() for w in r.warnings)
+    assert not r.errors
+
+
+def test_very_low_tracking_is_bad(tmp_path):
+    # 4/10 tracked (40% < 50), tiny steps -> error, BAD.
     xyz = np.zeros((10, 3))
     xyz[:, 0] = np.arange(10) * 0.003
     is_lost = [0, 1, 1, 0, 1, 1, 0, 1, 1, 0]
     r = check_trajectory(_write_traj(
         tmp_path / "camera_trajectory.csv", xyz, np.linspace(0, 1.0, 10), is_lost))
     assert r.tracking_pct == 40.0
-    assert r.verdict == "WARN"
-    assert any("tracking" in w.lower() for w in r.warnings)
-    assert not r.errors
+    assert r.verdict == "BAD"
+    assert any("very low tracking" in e.lower() for e in r.errors)
