@@ -11,13 +11,13 @@ for attribution and license compliance.
 <https://github.com/introlab/rtabmap>
 
 Built from source (v0.23.1) inside the SLAM Docker image
-(`grabette-postprocess/docker/oak_vslam/`); the offline odometry binary
+(`grabette-postprocess/docker/vslam/`); the offline odometry binary
 links RTAB-Map's core libraries.
 
 ### Luxonis DepthAI — MIT
 <https://github.com/luxonis/depthai-core>
 
-`grabette-postprocess/docker/oak_vslam/offline_vslam.cpp` adapts the processing
+`grabette-postprocess/docker/vslam/offline_vslam.cpp` adapts the processing
 logic of DepthAI's `RTABMapVIO` node (offline reimplementation; no DepthAI code
 is linked at build time).
 

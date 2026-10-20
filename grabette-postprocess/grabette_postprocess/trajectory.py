@@ -37,7 +37,7 @@ def trajectory_to_poses(df: pd.DataFrame) -> np.ndarray:
     """Convert trajectory DataFrame to (N, 6) pose array [x, y, z, ax, ay, az].
 
     Lost frames keep the SLAM's HELD pose (the CSV already holds the last good
-    pose on is_lost — see oak_slam._integrate_deltas). We must NOT zero them:
+    pose on is_lost — see slam._integrate_deltas). We must NOT zero them:
     zeroing sends the pose to the world origin, so every tracked<->lost
     transition becomes a physically-impossible teleport in the derived
     (delta) actions — the dominant source of "SLAM glitches" seen downstream,

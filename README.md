@@ -21,8 +21,8 @@ A HuggingFace Space that turns a raw Grabette recording dataset into a
 2. Give a **source** dataset `repo_id` (raw Grabette recording on the Hub), a
    **target** `repo_id` to create, and a task description.
 3. For each episode the Space runs, in-process:
-   - `convert_episode` — expand the recording into the `oak/` layout
-   - `run_oak_slam` — RGB-D odometry (visual-inertial when the camera has an IMU) via
+   - `convert_episode` — expand the recording into the `slam_input/` layout
+   - `run_slam` — RGB-D odometry (visual-inertial when the camera has an IMU) via
      the bundled `offline_vslam` binary
    - `build_dataset` — assemble a LeRobot v3 dataset
    - `push_to_hub` — upload under your account
@@ -37,9 +37,9 @@ A HuggingFace Space that turns a raw Grabette recording dataset into a
 ## Why a Docker Space
 
 The SLAM step is a compiled C++ binary (`offline_vslam`, built on RTAB-Map).
-Locally it runs in the `pollenrobotics/oak-vslam` Docker image, but Spaces cannot
+Locally it runs in the `pollenrobotics/grabette-vslam` Docker image, but Spaces cannot
 run Docker-in-Docker. So this Space **is** that image: it builds the binary at
-image-build time and `run_oak_slam(..., binary=...)` calls it directly.
+image-build time and `run_slam(..., binary=...)` calls it directly.
 
 ## Self-contained build
 

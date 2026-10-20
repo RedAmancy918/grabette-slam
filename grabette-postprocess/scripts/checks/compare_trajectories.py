@@ -3,7 +3,7 @@
 Compare two SLAM trajectories — with a noise floor, because this pipeline is
 not deterministic.
 
-RTAB-Map's F2M odometry is RANSAC-based, so re-running `run_oak_slam.py` on the
+RTAB-Map's F2M odometry is RANSAC-based, so re-running `run_slam.py` on the
 SAME episode with the SAME settings produces a measurably different trajectory.
 Measured on OAK-D episodes: ~2.3 mm local-delta RMSE against a ~3.7 mm mean
 step. Any A/B that ignores this will happily "discover" an effect that is just

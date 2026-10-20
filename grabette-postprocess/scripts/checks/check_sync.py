@@ -39,7 +39,7 @@ from grabette_postprocess.checks.sync import (
     _arducam_flow,
     check_gripper,
     check_image_trajectory,
-    check_oak_imu,
+    check_dcam_imu,
 )
 
 
@@ -85,7 +85,7 @@ def main(episode_dir, max_frames, vio_health, plot):
     ]
     if vio_health:
         print("Computing depth-camera left optical flow (dcam_left.mp4)...")
-        checks.append(("depth-cam left ↔ gyro", lambda: check_oak_imu(episode_dir, max_frames)))
+        checks.append(("depth-cam left ↔ gyro", lambda: check_dcam_imu(episode_dir, max_frames)))
 
     results = []
     for name, run in checks:

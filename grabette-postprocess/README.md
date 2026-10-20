@@ -23,7 +23,7 @@ Episode directory (from Grabette)
 ├── dcam_calib_offline.json            intrinsics + imu_to_cam
 └── metadata.json
 
-    │  convert_episode_to_oak.py → run_oak_slam.py
+    │  convert_episode_for_slam.py → run_slam.py
     ▼
 
 └── camera_trajectory.csv              trajectory (absolute poses, gravity-aligned Z-up)
@@ -48,32 +48,32 @@ uv sync                  # add --extra viz for the Rerun visualizer
 The SLAM step requires Docker. The image is published, so pull it:
 
 ```bash
-docker pull pollenrobotics/oak-vslam
+docker pull pollenrobotics/grabette-vslam
 ```
 
 Pin `:2026-07-22` instead of `:latest` when a result has to stay comparable.
 To build it yourself (Dockerfile + `offline_vslam.cpp` are both in the repo):
 
 ```bash
-docker build -t pollenrobotics/oak-vslam docker/oak_vslam/
+docker build -t pollenrobotics/grabette-vslam docker/vslam/
 ```
 
 ## Quick start
 
 The pipeline expects `-i` to point at a **dataset directory** containing one or
 more episode subdirectories (`<dataset>/<episode>/…`), except for the
-per-episode scripts (`convert_episode_to_oak.py`, `run_oak_slam.py`,
+per-episode scripts (`convert_episode_for_slam.py`, `run_slam.py`,
 `visualize_rgbd_trajectory.py`) which take a **single episode directory**.
 
 ```bash
 # 1. Sanity-check the recording (no Docker, fast) — sample counts, file inventory
 uv run python scripts/checks/check_dataset.py -i ~/data/dataset
 
-# 2. Convert the compact recording into the per-file oak/ layout the C++ expects
-uv run python scripts/pipeline/convert_episode_to_oak.py -i ~/data/dataset/episode
+# 2. Convert the compact recording into the per-file slam_input/ layout the C++ expects
+uv run python scripts/pipeline/convert_episode_for_slam.py -i ~/data/dataset/episode
 
 # 3. Run offline RTAB-Map VSLAM → camera_trajectory.csv
-uv run python scripts/pipeline/run_oak_slam.py -i ~/data/dataset/episode
+uv run python scripts/pipeline/run_slam.py -i ~/data/dataset/episode
 
 # 4. Validate trajectories (drift, relocalization jumps, motion realism)
 uv run python scripts/checks/check_trajectory.py -i ~/data/dataset -v
@@ -106,12 +106,12 @@ doesn't need to correspond to a real HF account until you actually push (step 8)
 ### 1. Trajectory extraction (RGB-D SLAM, RTAB-Map)
 
 The recording (grabette's `hardware/orbbec.py` or `hardware/oakd.py`) stores compact mp4 + JSON sidecars.
-`convert_episode_to_oak.py` expands these into the `oak/` layout
+`convert_episode_for_slam.py` expands these into the `slam_input/` layout
 (`frames/`, `depth/`, `timestamps.csv`, `imu_acc.csv`, `imu_gyro.csv`,
 `imu_rotation.csv`, `calib_offline.json`) consumed by the C++ `offline_vslam`
 binary.
 
-`run_oak_slam.py` then runs RTAB-Map odometry in Docker, integrates the
+`run_slam.py` then runs RTAB-Map odometry in Docker, integrates the
 frame-to-frame deltas into absolute poses, rotates the world frame to Z-up
 (x forward, y left, z up) and writes `camera_trajectory.csv`. With an IMU the
 rotation comes from gravity, estimated robustly from the accel stream; on an
@@ -197,18 +197,18 @@ grabette-postprocess/
 ├── pyproject.toml
 ├── grabette_postprocess/
 │   ├── trajectory.py       # CSV parsing, quaternion→axis-angle, ANGL interpolation
-│   ├── convert.py          # recording → oak/ layout expansion
-│   ├── oak_slam.py         # RTAB-Map orchestration (delta integration + Z-up world align)
+│   ├── convert.py          # recording → slam_input/ layout expansion
+│   ├── slam.py             # RTAB-Map orchestration (delta integration + Z-up world align)
 │   ├── dataset.py          # LeRobot v3 dataset builder
 │   ├── episode_manager.py  # episode discovery / dropping
 │   └── checks/             # validation logic (recording, sync, trajectory)
 ├── docker/
-│   └── oak_vslam/       # RTAB-Map offline_vslam C++ + Dockerfile
+│   └── vslam/           # RTAB-Map offline_vslam C++ + Dockerfile
 ├── tests/               # unit tests (pytest)
 └── scripts/                           # local CLIs (mirror the post-processing pipeline)
     ├── pipeline/                       # the pipeline stages, in order
-    │   ├── convert_episode_to_oak.py   # recording → oak/ layout
-    │   ├── run_oak_slam.py             # offline RGB-D VSLAM → camera_trajectory.csv
+    │   ├── convert_episode_for_slam.py # recording → slam_input/ layout
+    │   ├── run_slam.py                 # offline RGB-D VSLAM → camera_trajectory.csv
     │   ├── generate_dataset.py         # trajectories → LeRobot v3
     │   └── push_to_hub.py              # upload dataset to Hugging Face Hub
     ├── checks/                         # validation / QA

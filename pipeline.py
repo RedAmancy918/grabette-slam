@@ -1,7 +1,7 @@
 """Episode → SLAM → LeRobot → Hub pipeline, run in-process inside the Space.
 
 Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
-(no Docker), so run_oak_slam is called with binary=VSLAM_BINARY.
+(no Docker), so slam.run_slam is called with binary=VSLAM_BINARY.
 """
 
 import os
@@ -12,11 +12,11 @@ from functools import partial
 from pathlib import Path
 
 from grabette_postprocess.convert import convert_episode
-from grabette_postprocess.oak_slam import run_oak_slam
+from grabette_postprocess import slam
 from grabette_postprocess.episode_manager import find_episodes
 from grabette_postprocess.checks.trajectory import check_trajectory
 from grabette_postprocess.checks.recording import check_recording
-from grabette_postprocess.checks.sync import check_oak_imu, check_image_trajectory
+from grabette_postprocess.checks.sync import check_dcam_imu, check_image_trajectory
 
 BINARY = os.environ.get("VSLAM_BINARY", "/usr/local/bin/offline_vslam")
 
@@ -29,8 +29,8 @@ _PUSH_LOCK = threading.Lock()
 
 
 def _check_sync(episode_dir):
-    """Thin adapter: run check_oak_imu and normalise to {verdict, message}."""
-    result = check_oak_imu(episode_dir)
+    """Thin adapter: run check_dcam_imu and normalise to {verdict, message}."""
+    result = check_dcam_imu(episode_dir)
     if result is None:
         return None
     lag_ms = abs(result["lag"]) * 1000
@@ -294,7 +294,7 @@ def _slam_episode(ep: Path, run_sync: bool = False):
     convert_episode(ep)
 
     lines.append(f"▶ {name}: SLAM")
-    r = run_oak_slam(ep, binary=BINARY, show_progress=False)
+    r = slam.run_slam(ep, binary=BINARY, show_progress=False)
     if r.trajectory_path is None:
         lines.append(f"  ✗ {name}: SLAM failed (rc={r.returncode})")
         return (None, None), lines
@@ -430,7 +430,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         build with the list of (episode_dir, trajectory_report) tuples. It returns
         the episode dirs to keep — letting the caller drop episodes whose
         trajectory check came back flagged. When None, every episode is kept.
-    run_sync: enable the debug-only sync diagnostics (pre-SLAM OAK cam↔gyro and
+    run_sync: enable the debug-only sync diagnostics (pre-SLAM depth-cam↔gyro and
         post-SLAM image↔trajectory). Off by default.
     """
     # No global HF_TOKEN here: this function only builds locally and resolves the
