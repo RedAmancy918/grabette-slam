@@ -16,7 +16,7 @@ FROM pollenrobotics/oak-vslam
 
 USER root
 # offline_vslam is compiled to this path below; the app calls it as a subprocess.
-ENV OAK_VSLAM_BINARY=/usr/local/bin/offline_vslam
+ENV VSLAM_BINARY=/usr/local/bin/offline_vslam
 
 # Python 3.12 (lerobot requires it; the base ships 3.10) via deadsnakes.
 RUN apt-get update \
@@ -74,6 +74,6 @@ COPY --chown=user app.py pipeline.py views.py controller.py review.py session.py
 
 EXPOSE 7860
 # Override the base image's offline_vslam entrypoint — we run the conversion app,
-# which invokes offline_vslam as a subprocess via OAK_VSLAM_BINARY.
+# which invokes offline_vslam as a subprocess via VSLAM_BINARY.
 ENTRYPOINT []
 CMD ["python", "app.py"]

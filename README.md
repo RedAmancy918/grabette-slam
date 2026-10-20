@@ -18,11 +18,12 @@ A HuggingFace Space that turns a raw Grabette recording dataset into a
 [LeRobot](https://github.com/huggingface/lerobot) dataset and pushes it to the Hub.
 
 1. **Sign in** with your Hugging Face account (OAuth).
-2. Give a **source** dataset `repo_id` (raw OAK-D recording on the Hub), a
+2. Give a **source** dataset `repo_id` (raw Grabette recording on the Hub), a
    **target** `repo_id` to create, and a task description.
 3. For each episode the Space runs, in-process:
    - `convert_episode` — expand the recording into the `oak/` layout
-   - `run_oak_slam` — RGBD-inertial odometry via the bundled `offline_vslam` binary
+   - `run_oak_slam` — RGB-D odometry (visual-inertial when the camera has an IMU) via
+     the bundled `offline_vslam` binary
    - `build_dataset` — assemble a LeRobot v3 dataset
    - `push_to_hub` — upload under your account
 4. A link + embedded view of the
@@ -42,14 +43,51 @@ image-build time and `run_oak_slam(..., binary=...)` calls it directly.
 
 ## Self-contained build
 
-The `grabette-postprocess` package (with `offline_vslam.cpp`) is vendored into
-the build context as `./grabette-postprocess` — no git clone, no private-repo
-secret. `deploy.sh` assembles that layout from the working tree and uploads it.
-
-```bash
-HF="uv run --project ../../packages/grabette-postprocess hf" \
-  ./deploy.sh pollen-robotics/grabette-slam
-```
+The pipeline lives in this repo: `./grabette-postprocess` is the package the
+Space installs (with `offline_vslam.cpp`, compiled at image-build time) and is
+its source of truth. The Docker build needs nothing outside this tree.
 
 > Note: RTAB-Map is compiled with `--parallel 2` to stay within the HF build
 > runner's memory (full parallelism OOMs it).
+
+## Deployment
+
+Both Spaces build from this repo, through GitHub Actions:
+
+- **prod**: every push to `main` syncs it to the main Space
+  (`sync-to-hf-space.yml`).
+- **test**: run *Deploy a branch to HF test Space*
+  (`deploy-branch-to-hf-test-space.yml`) from the Actions tab, on any branch,
+  tag or SHA.
+
+## Local development
+
+**Native (fast, for the UI and pipeline glue).** From the repo root:
+
+```bash
+uv venv --python 3.12
+uv pip install -e ./grabette-postprocess -r requirements.txt
+hf auth login    # once: the local Sign-in button is mocked with this account
+.venv/bin/python app.py    # → http://localhost:7860
+```
+
+The SLAM step needs the `offline_vslam` binary (`VSLAM_BINARY`, default
+`/usr/local/bin/offline_vslam`), which is only built inside the Docker image.
+For anything that runs SLAM, use the image.
+
+**Docker (the same image as the Space).**
+
+```bash
+docker build -t grabette-slam .
+docker run --rm -p 7860:7860 -e SYSTEM= \
+  -v ~/.cache/huggingface:/home/user/.cache/huggingface grabette-slam
+```
+
+`SYSTEM=` clears the image's `SYSTEM=spaces`, so Gradio mocks the sign-in with
+your local Hugging Face login instead of expecting the Space's OAuth variables.
+
+On Apple Silicon, turn on Docker Desktop → Settings → General → "Use Rosetta for
+x86_64/amd64 emulation": the image is amd64-only, and under the default qemu
+emulation the app segfaults at startup.
+
+**Tests:** see [`grabette-postprocess/README.md`](grabette-postprocess/README.md#tests).
