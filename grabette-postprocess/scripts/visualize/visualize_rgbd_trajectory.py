@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visualize OAK-D RGBD SLAM trajectory using Rerun.
+Visualize an RGB-D SLAM trajectory using Rerun.
 
 Usage:
     uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir>
@@ -79,7 +79,7 @@ def _gravity_align(positions: np.ndarray, quaternions: np.ndarray,
 
 
 def _load_oak_imu(oak_dir: Path) -> dict | None:
-    """Load IMU from OAK imu_acc.csv / imu_gyro.csv (timestamp_ns, x, y, z)."""
+    """Load IMU from the depth camera's imu_acc.csv / imu_gyro.csv (timestamp_ns, x, y, z)."""
     acc_path = oak_dir / "imu_acc.csv"
     gyro_path = oak_dir / "imu_gyro.csv"
     if not acc_path.is_file() or not gyro_path.is_file():
@@ -142,7 +142,7 @@ def _log_oak_imu(imu_data: dict, t0: float):
                    'producing camera_trajectory.csv. Use for legacy CSVs that '
                    'predate the in-pipeline gravity align.')
 def main(episode_dir, show_video, video_skip, app_id, gravity_align):
-    """Visualize OAK SLAM trajectory from a processed episode directory."""
+    """Visualize the SLAM trajectory from a processed episode directory."""
     episode_dir = Path(episode_dir)
     oak_dir = episode_dir / "oak"
 
@@ -201,14 +201,14 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
     df_all = df_all.copy()
     df_all['timestamp'] = df_all['timestamp'] - t0
 
-    # --- Load OAK IMU ---
+    # --- Load the depth camera's IMU (absent on IMU-less cameras) ---
     imu_data = _load_oak_imu(oak_dir) if oak_dir.is_dir() else None
     if imu_data:
         print(f"IMU: {len(imu_data['accel'])} accel, {len(imu_data['gyro'])} gyro samples")
     else:
         print("IMU: not found (expected oak/imu_acc.csv and oak/imu_gyro.csv)")
 
-    # --- Open OAK left video (what the SLAM actually saw) ---
+    # --- Open the depth camera's left video (what the SLAM actually saw) ---
     # We use dcam_left.mp4 — NOT raw_video.mp4 — because:
     #   1. raw_video.mp4 is the RPi fisheye camera, not the SLAM input.
     #   2. dcam_left.mp4 is the rectified SLAM input; its frames are 1:1
@@ -228,7 +228,7 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
             n_vframes = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             vid_w = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             vid_h = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"OAK left video: {n_vframes} frames at {video_fps:.2f} fps ({vid_w}x{vid_h})")
+            print(f"Depth-camera left video: {n_vframes} frames at {video_fps:.2f} fps ({vid_w}x{vid_h})")
     elif show_video:
         print("Video: dcam_left.mp4 not found, camera feed disabled")
 

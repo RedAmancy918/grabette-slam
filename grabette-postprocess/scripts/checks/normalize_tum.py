@@ -2,7 +2,7 @@
 """Normalize a TUM trajectory so its first timestamp is 0.
 
 Useful when comparing two trajectories captured with different clock
-references (e.g. OAK device time vs host monotonic time) but the
+references (e.g. depth-camera device time vs host monotonic time) but the
 recordings overlap in real time. After normalization, both files start
 at t=0 and `evo_ape`/`evo_rpe` can match by closest timestamp.
 

@@ -1,11 +1,11 @@
-"""Temporal-alignment checks for the OAK + Arducam rig.
+"""Temporal-alignment checks for the depth camera + Arducam rig.
 
 All checks cross-correlate two motion signals resampled to a common grid; the
 lag of the correlation peak is the timing offset between the two streams. Three
 checks, each answering a different alignment question:
 
-  1. check_oak_imu          — OAK left camera ↔ OAK gyro (SLAM VIO health).
-     Same device, shared OAK clock (device_us). Confirms the visual-inertial
+  1. check_oak_imu          — depth-camera left stream ↔ its gyro (SLAM VIO health).
+     Same device, shared device clock (device_us). Cameras with an IMU only. Confirms the visual-inertial
      SLAM *inputs* are time-aligned. A prerequisite for trusting the trajectory.
 
   2. check_image_trajectory — Arducam optical flow ↔ SLAM trajectory angular
@@ -110,10 +110,10 @@ def compute_optical_flow_magnitude(
 
 
 def load_oak_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Load the OAK gyroscope and return (timestamps_s, angular_velocity_norm).
+    """Load the depth camera's gyroscope and return (timestamps_s, angular_velocity_norm).
 
-    Reads dcam_imu.json (flat schema, kind == "gyro"). Timestamps use the OAK
-    device clock (device_us), which the cameras and IMU share on the OAK
+    Reads dcam_imu.json (flat schema, kind == "gyro"). Timestamps use the camera's
+    device clock (device_us), which its image sensors and IMU share in
     hardware, so the camera↔gyro comparison reflects true capture timing rather
     than USB-arrival (host_ms) jitter. Falls back to host_ms for legacy
     recordings without device_us.
@@ -130,8 +130,8 @@ def load_oak_gyro_norm(imu_path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def oak_left_frame_ts(episode_dir: Path) -> np.ndarray | None:
-    """Per-frame device_us timestamps (seconds) for dcam_left.mp4 — the OAK
-    hardware clock, matching the gyro from load_oak_gyro_norm. Falls back to
+    """Per-frame device_us timestamps (seconds) for dcam_left.mp4 — the depth
+    camera's hardware clock, matching the gyro from load_oak_gyro_norm. Falls back to
     host_ms when device_us is absent. None when the file is missing."""
     ts_path = resolve(episode_dir, "dcam_left_timestamps.json")
     if not ts_path.is_file():
@@ -163,7 +163,7 @@ def trajectory_angular_velocity(
     Reads camera_trajectory.csv (columns include timestamp, q_x..q_w, is_lost),
     drops lost frames, and takes the geodesic angle between consecutive pose
     orientations divided by dt. Stamped at the interval midpoint to match
-    compute_optical_flow_magnitude. The Arducam is rigid with the OAK, so this
+    compute_optical_flow_magnitude. The Arducam is rigid with the depth camera, so this
     angular velocity tracks the same egomotion the Arducam sees — correlating the
     two measures the image↔pose timing offset end-to-end through SLAM.
 
@@ -313,7 +313,8 @@ def _result(label: str, ref_label: str, cam_ts, cam_sig, ref_ts, ref_sig,
 
 
 def check_oak_imu(episode_dir: Path, max_frames: int = 300) -> dict | None:
-    """OAK left camera ↔ OAK gyro (SLAM VIO health). None when inputs missing."""
+    """Depth-camera left stream ↔ its gyro (SLAM VIO health). None when inputs
+    missing, which includes IMU-less cameras (Gemini 305)."""
     episode_dir = Path(episode_dir)
     video = resolve(episode_dir, "dcam_left.mp4")
     imu = resolve(episode_dir, "dcam_imu.json")
@@ -325,7 +326,7 @@ def check_oak_imu(episode_dir: Path, max_frames: int = 300) -> dict | None:
         return None
     frame_ts = oak_left_frame_ts(episode_dir)
     flow_ts, flow_mag = compute_optical_flow_magnitude(video, frame_ts, max_frames)
-    return _result("OAK-left ↔ OAK-gyro (SLAM VIO health)", "OAK gyro",
+    return _result("depth-cam left ↔ gyro (SLAM VIO health)", "depth-cam gyro",
                    flow_ts, flow_mag, gyro_ts, gyro_norm, approx=frame_ts is None)
 
 
