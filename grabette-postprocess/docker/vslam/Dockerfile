@@ -17,6 +17,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 ARG RTABMAP_VERSION=0.23.1
+# Parallel compile jobs (default: all cores). Each job can take >1 GB, so lower
+# it on a small VM, e.g. --build-arg BUILD_JOBS=4 in an 8 GB Docker Desktop.
+ARG BUILD_JOBS
 RUN git clone --depth 1 --branch ${RTABMAP_VERSION} \
         https://github.com/introlab/rtabmap.git /tmp/rtabmap \
  && cmake -S /tmp/rtabmap -B /tmp/rtabmap/build \
@@ -24,7 +27,7 @@ RUN git clone --depth 1 --branch ${RTABMAP_VERSION} \
         -DBUILD_APP=OFF \
         -DBUILD_EXAMPLES=OFF \
         -DBUILD_TOOLS=OFF \
- && cmake --build /tmp/rtabmap/build --parallel $(nproc) \
+ && cmake --build /tmp/rtabmap/build --parallel ${BUILD_JOBS:-$(nproc)} \
  && cmake --install /tmp/rtabmap/build \
  && ldconfig \
  && rm -rf /tmp/rtabmap
