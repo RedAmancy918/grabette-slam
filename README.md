@@ -86,4 +86,8 @@ docker run --rm -p 7860:7860 -e SYSTEM= \
 `SYSTEM=` clears the image's `SYSTEM=spaces`, so Gradio mocks the sign-in with
 your local Hugging Face login instead of expecting the Space's OAuth variables.
 
+On Apple Silicon, turn on Docker Desktop → Settings → General → "Use Rosetta for
+x86_64/amd64 emulation": the image is amd64-only, and under the default qemu
+emulation the app segfaults at startup.
+
 **Tests:** see [`grabette-postprocess/README.md`](grabette-postprocess/README.md#tests).
