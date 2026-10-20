@@ -10,8 +10,9 @@
 # changes — so the two drift apart silently. They did: the IMU-less calib fix
 # was in this tree but not in the base's binary, and every Gemini episode
 # aborted (SIGABRT, surfacing as rc=-6) in a Space whose source had the fix.
-# Compiling from the deployed tree costs ~10 s and makes the binary match the
-# source by construction.
+# The base was rebuilt (:2026-10-20, now :latest) and matches the source again,
+# but nothing keeps it that way. Compiling from the deployed tree costs ~10 s
+# and makes the binary match the source by construction.
 FROM pollenrobotics/grabette-vslam
 
 USER root

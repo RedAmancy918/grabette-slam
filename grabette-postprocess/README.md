@@ -51,12 +51,17 @@ The SLAM step requires Docker. The image is published, so pull it:
 docker pull pollenrobotics/grabette-vslam
 ```
 
-Pin `:2026-07-22` instead of `:latest` when a result has to stay comparable.
+It is multi-arch (amd64 + arm64), so it runs natively on Apple Silicon.
+Pin `:2026-10-20` instead of `:latest` when a result has to stay comparable
+(`:2026-07-22` predates IMU-less camera support and aborts on Gemini episodes).
 To build it yourself (Dockerfile + `offline_vslam.cpp` are both in the repo):
 
 ```bash
 docker build -t pollenrobotics/grabette-vslam docker/vslam/
 ```
+
+Add `--build-arg BUILD_JOBS=4` if the RTAB-Map compile runs out of memory
+(e.g. in Docker Desktop's default 8 GB VM).
 
 ## Quick start
 
