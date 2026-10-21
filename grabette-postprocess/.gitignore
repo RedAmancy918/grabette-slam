@@ -14,7 +14,10 @@ mapping_camera_trajectory.csv
 imu_data_resampled.json
 slam_mask.png
 slam_metadata.json
-oak_slam_stdout.txt
+slam_stdout.txt
 poses.csv
 gravity.csv
 biases.csv
+
+# Orbbec SDK writes this into the CWD of whatever runs it.
+Log/

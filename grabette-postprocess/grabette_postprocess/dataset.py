@@ -1,8 +1,8 @@
 """LeRobot v3 dataset builder for GRABETTE.
 
 Converts trajectory + capture data into LeRobot v3 format (Parquet + MP4).
-Two camera observations: cam0 (RPi fisheye, raw_video.mp4) and cam1 (OAK left,
-dcam_left.mp4), both selected nearest-by-timestamp against the trajectory.
+Two camera observations: cam0 (RPi fisheye, raw_video.mp4) and cam1 (depth camera
+left, dcam_left.mp4), both selected nearest-by-timestamp against the trajectory.
 """
 
 import json
@@ -32,7 +32,7 @@ FEATURES_BASE = {
     },
     "observation.images.cam1": {
         "dtype": "video",
-        "shape": (3, 720, 960),  # OAK left, resized to image_size like cam0
+        "shape": (3, 720, 960),  # depth camera left, resized to image_size like cam0
         "names": ["channels", "height", "width"],
     },
     "action": {
@@ -97,7 +97,7 @@ def _load_video_timestamps(episode_dir: Path, video_path: Path) -> np.ndarray:
     return np.arange(n_frames, dtype=np.float64) / video_fps
 
 
-def _load_oak_left_timestamps(episode_dir: Path) -> np.ndarray | None:
+def _load_dcam_left_timestamps(episode_dir: Path) -> np.ndarray | None:
     """Per-frame host_ms timestamps (seconds) for dcam_left.mp4 — the same clock
     the SLAM stamps the trajectory with (convert.py feeds host_ms), so nearest-ts
     matching against the trajectory is exact. None when missing/empty."""
@@ -186,12 +186,13 @@ def build_dataset(
             key by episode_id instead of the (colliding) role.
     """
     # Lazy import — lerobot is a heavy dependency
+    from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     name_of = recording_name_of or (lambda d: Path(d).name)
 
     if fps is None:
-        fps = 50.0
+        fps = 30.0
         print(f"Using default fps: {int(fps)}")
 
     # Build feature schema
@@ -213,7 +214,8 @@ def build_dataset(
         root=root,
         robot_type="grabette",
         use_videos=True,
-        vcodec="h264",  # kept over the libsvtav1 default so the LeRobot web visualizer can play it
+        # h264 kept over the libsvtav1 default so the LeRobot web visualizer can play it
+        rgb_encoder=RGBEncoderConfig(vcodec="h264"),
         # Encode frames straight to MP4 as they're added, instead of writing every
         # frame to disk as PNG and re-reading + re-encoding at save_episode(). The
         # PNG round-trip is the main cost of the "building dataset" step on CPU.
@@ -231,7 +233,7 @@ def build_dataset(
         # Find trajectory file
         traj_path = find_trajectory_csv(ep_dir)
         if traj_path is None:
-            print(f"  Skipping: no trajectory CSV found")
+            print("  Skipping: no trajectory CSV found")
             continue
 
         # Trajectory timestamps in seconds, relative to recording start (t=0),
@@ -251,28 +253,28 @@ def build_dataset(
         cam0_cache = _load_video_frames_indexed(video_path, image_size,
                                                 set(cam0_indices.tolist()))
 
-        # --- cam1: OAK left video, same nearest-by-timestamp selection ---
-        oak_path = resolve(ep_dir, "dcam_left.mp4")
-        oak_ts = _load_oak_left_timestamps(ep_dir)
-        print(f"  OAK left video: {len(oak_ts)} frames, {oak_ts[-1]:.2f}s")
-        cam1_indices = _nearest_frame_indices(traj_ts, oak_ts)
-        cam1_cache = _load_video_frames_indexed(oak_path, image_size,
+        # --- cam1: depth-camera left video, same nearest-by-timestamp selection ---
+        dcam_path = resolve(ep_dir, "dcam_left.mp4")
+        dcam_ts = _load_dcam_left_timestamps(ep_dir)
+        print(f"  Depth-camera left video: {len(dcam_ts)} frames, {dcam_ts[-1]:.2f}s")
+        cam1_indices = _nearest_frame_indices(traj_ts, dcam_ts)
+        cam1_cache = _load_video_frames_indexed(dcam_path, image_size,
                                                 set(cam1_indices.tolist()))
 
         for i in range(n_frames):
             img = cam0_cache.get(cam0_indices[i])
-            oak_img = cam1_cache.get(cam1_indices[i])
-            if img is None or oak_img is None:
-                which = "RPi" if img is None else "OAK left"
+            dcam_img = cam1_cache.get(cam1_indices[i])
+            if img is None or dcam_img is None:
+                which = "RPi" if img is None else "depth-camera left"
                 print(f"  Warning: missing {which} frame at step {i}, t={traj_ts[i]:.3f}s")
                 break
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            oak_rgb = cv2.cvtColor(oak_img, cv2.COLOR_BGR2RGB)
+            dcam_rgb = cv2.cvtColor(dcam_img, cv2.COLOR_BGR2RGB)
 
             dataset.add_frame({
                 "task": task,
                 "observation.images.cam0": img_rgb,
-                "observation.images.cam1": oak_rgb,
+                "observation.images.cam1": dcam_rgb,
                 "action": actions[i],
                 "is_lost": np.array([is_lost[i]], dtype=np.float32),
             })
@@ -312,7 +314,7 @@ def _load_capture_started(ep_dir: Path) -> float | None:
 
 def _load_arm_streams(ep_dir: Path, image_size: tuple[int, int]) -> dict:
     """Load one arm's SLAM trajectory + 8D actions + is_lost + per-video
-    timestamps (cam0 RPi fisheye, cam1 OAK left) for nearest-ts frame selection,
+    timestamps (cam0 RPi fisheye, cam1 depth-camera left) for nearest-ts frame selection,
     plus its capture_started clock. Raises if the trajectory or a video is
     missing (a valid grabette arm always has all of them)."""
     ep_dir = Path(ep_dir).absolute()
@@ -321,7 +323,7 @@ def _load_arm_streams(ep_dir: Path, image_size: tuple[int, int]) -> dict:
         raise ValueError(f"no trajectory CSV in {ep_dir}")
     df = load_trajectory_csv(traj_path)
     traj_ts = df["timestamp"].values.astype(np.float64)
-    cam1_ts = _load_oak_left_timestamps(ep_dir)
+    cam1_ts = _load_dcam_left_timestamps(ep_dir)
     if cam1_ts is None:
         raise ValueError(f"no depth-camera left timestamps in {ep_dir}")
     return {
@@ -354,8 +356,8 @@ def build_dataset_multi(
     exactly the left block of a bimanual episode — so mono and bimanual share one
     format, differing only in how many arms are present.
 
-    Per role: observation.images.{role}_cam0 (RPi fisheye) + {role}_cam1 (OAK
-    left); `action` is the per-role 8D absolute states concatenated (in `roles`
+    Per role: observation.images.{role}_cam0 (RPi fisheye) + {role}_cam1 (depth
+    camera left); `action` is the per-role 8D absolute states concatenated (in `roles`
     order); `is_lost` is per-role.
 
     groups: {episode_id: {role: arm_episode_dir}} — one entry per synchronized
@@ -363,10 +365,11 @@ def build_dataset_multi(
     The arms of one recording share a wall clock (synchronized start); we align
     them frame-exactly via each recording's capture_started_utc, using the first
     role as the reference timeline and sampling the others nearest-ts on it."""
+    from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     if fps is None:
-        fps = 50.0
+        fps = 30.0
         print(f"Using default fps: {int(fps)}")
     h, w = image_size
 
@@ -389,7 +392,8 @@ def build_dataset_multi(
 
     dataset = LeRobotDataset.create(
         repo_id=repo_id, fps=int(fps), features=features, root=root,
-        robot_type="grabette", use_videos=True, vcodec="h264",
+        robot_type="grabette", use_videos=True,
+        rgb_encoder=RGBEncoderConfig(vcodec="h264"),
         streaming_encoding=True,
     )
 

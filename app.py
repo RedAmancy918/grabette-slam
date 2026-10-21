@@ -81,7 +81,7 @@ with gr.Blocks(title="Grabette SLAM → LeRobot") as demo:
             target = gr.Textbox(label="Target dataset", info="repo to create or contribute to",
                                 placeholder="your-account/grabette-dataset")
             task = gr.Textbox(label="Task description", placeholder="cup grasping")
-            # Sync checks (OAK cam↔gyro pre-SLAM, image↔trajectory post-SLAM) are a
+            # Sync checks (depth-cam↔gyro pre-SLAM, image↔trajectory post-SLAM) are a
             # debug-only diagnostic — off by default so a normal run skips them.
             debug_sync = gr.Checkbox(
                 label="Run sync checks (debug)", value=False,

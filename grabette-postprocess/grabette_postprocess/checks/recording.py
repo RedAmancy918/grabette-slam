@@ -1,4 +1,4 @@
-"""Raw-recording content check for the OAK + Arducam rig (before SLAM).
+"""Raw-recording content check for the depth camera + Arducam rig (before SLAM).
 
 Deliberately minimal and cheap: it answers one question — *is the data the
 pipeline needs actually present and non-empty?* — without the expensive
@@ -87,8 +87,8 @@ def _check_arducam(ep_dir: Path, status: dict) -> None:
     _check_video(ep_dir / "raw_video.mp4", "arducam", status, required=True)
 
 
-def _check_oak_cameras(ep_dir: Path, require_right: bool, status: dict) -> None:
-    """OAK left video + its timestamps (SLAM inputs). The right camera is not a
+def _check_dcam_cameras(ep_dir: Path, require_right: bool, status: dict) -> None:
+    """Depth-camera left video + its timestamps (SLAM inputs). The right camera is not a
     SLAM/dataset input, so it's only checked (non-fatally) when require_right."""
     _check_video(resolve(ep_dir, "dcam_left.mp4"), "dcam_left", status, required=True)
     lt = resolve(ep_dir, "dcam_left_timestamps.json")
@@ -153,9 +153,9 @@ def _check_imu(ep_dir: Path, status: dict) -> None:
     info.append("imu " + "/".join(f"{k[:3]}:{n}" for k, n in counts.items()))
     for kind in ("accel", "gyro"):
         if not counts[kind]:
-            err.append(f"oak imu: no {kind} samples")
+            err.append(f"imu: no {kind} samples")
     if not counts["rotation"]:
-        warn.append("oak imu: no rotation samples (VIO init aid absent)")
+        warn.append("imu: no rotation samples (VIO init aid absent)")
 
 
 _JOINTS = ((0, "distal"), (1, "proximal"))  # value = [distal, proximal]
@@ -315,7 +315,7 @@ def check_recording(ep_dir: Path, require_right: bool | None = None) -> dict:
         require_right = _expects_right_stream(ep_dir)
 
     _check_arducam(ep_dir, status)
-    _check_oak_cameras(ep_dir, require_right, status)
+    _check_dcam_cameras(ep_dir, require_right, status)
     _check_depth(ep_dir, status)
     _check_seq_overlap(ep_dir, status)
     _check_imu(ep_dir, status)

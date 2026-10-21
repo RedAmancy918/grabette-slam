@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick health check on a dataset directory (OAK + Arducam hardware).
+"""Quick health check on a dataset directory (depth camera + Arducam hardware).
 
 For each episode, checks the recordings produced by the current rig:
   - Arducam observation camera : raw_video.mp4 (+ frame_timestamps.json)
@@ -30,7 +30,7 @@ from grabette_postprocess.episode_manager import find_episodes
               type=click.Path(exists=True), help="Dataset directory to check")
 @click.option("-v", "--verbose", is_flag=True, help="Show per-episode info lines too")
 def main(dataset_dir, verbose):
-    """Check dataset health: Arducam video, OAK RGBD/IMU, gripper angles, SLAM outputs."""
+    """Check dataset health: Arducam video, depth-camera RGB-D/IMU, gripper angles, SLAM outputs."""
     dataset_dir = Path(dataset_dir).expanduser().absolute()
 
     # An episode is any dir containing a depth recording. Anchor on the SLAM

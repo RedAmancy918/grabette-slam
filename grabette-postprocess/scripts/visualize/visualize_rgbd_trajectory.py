@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Visualize OAK-D RGBD SLAM trajectory using Rerun.
+Visualize an RGB-D SLAM trajectory using Rerun.
 
 Usage:
-    uv run python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir>
-    uv run python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir> --video-skip 3
+    uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir>
+    uv run --extra viz python scripts/visualize/visualize_rgbd_trajectory.py -i <episode_dir> --video-skip 3
 """
 
 import json
@@ -12,19 +12,29 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    import rerun as rr
+    import rerun.blueprint as rrb
+except ImportError:
+    print(
+        "rerun-sdk is required for this script. Install the viz extra, e.g.\n"
+        "  pip install 'grabette-postprocess[viz]'\n"
+        "  uv sync --extra viz",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 from grabette_postprocess.episode_files import resolve
 
 import click
 import cv2
 import numpy as np
 import pandas as pd
-import rerun as rr
-import rerun.blueprint as rrb
 from scipy.spatial.transform import Rotation
 
 
 def _gravity_align(positions: np.ndarray, quaternions: np.ndarray,
-                   oak_dir: Path, n_samples: int = 50,
+                   slam_dir: Path, n_samples: int = 50,
                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Rotate trajectory so gravity (in WORLD frame) points to world -Z.
 
@@ -45,10 +55,10 @@ def _gravity_align(positions: np.ndarray, quaternions: np.ndarray,
     Returns (positions, quaternions, g_world_unit) where g_world_unit is the
     measured gravity direction in the original (pre-align) world frame.
     """
-    imu_acc = pd.read_csv(oak_dir / "imu_acc.csv")
+    imu_acc = pd.read_csv(slam_dir / "imu_acc.csv")
     g_imu = imu_acc[["ax", "ay", "az"]].iloc[:n_samples].mean().to_numpy()
 
-    calib = json.loads((oak_dir / "calib_offline.json").read_text())
+    calib = json.loads((slam_dir / "calib_offline.json").read_text())
     R_imu_to_cam = np.array(calib["imu_to_cam"])[:3, :3]
     # Accelerometer at rest = SPECIFIC FORCE (points UP). Negate for physical
     # gravity (DOWN) so the align-to-(0,0,-1) below gives a Z-UP world.
@@ -68,10 +78,10 @@ def _gravity_align(positions: np.ndarray, quaternions: np.ndarray,
 
 
 
-def _load_oak_imu(oak_dir: Path) -> dict | None:
-    """Load IMU from OAK imu_acc.csv / imu_gyro.csv (timestamp_ns, x, y, z)."""
-    acc_path = oak_dir / "imu_acc.csv"
-    gyro_path = oak_dir / "imu_gyro.csv"
+def _load_dcam_imu(slam_dir: Path) -> dict | None:
+    """Load IMU from the depth camera's imu_acc.csv / imu_gyro.csv (timestamp_ns, x, y, z)."""
+    acc_path = slam_dir / "imu_acc.csv"
+    gyro_path = slam_dir / "imu_gyro.csv"
     if not acc_path.is_file() or not gyro_path.is_file():
         return None
 
@@ -96,7 +106,7 @@ def _load_oak_imu(oak_dir: Path) -> dict | None:
     return {'accel': accel, 'gyro': gyro}
 
 
-def _log_oak_imu(imu_data: dict, t0: float):
+def _log_dcam_imu(imu_data: dict, t0: float):
     rr.log("imu/accelerometer/x", rr.SeriesLines(colors=[255, 0, 0], names="accel_x"), static=True)
     rr.log("imu/accelerometer/y", rr.SeriesLines(colors=[0, 255, 0], names="accel_y"), static=True)
     rr.log("imu/accelerometer/z", rr.SeriesLines(colors=[0, 0, 255], names="accel_z"), static=True)
@@ -128,13 +138,13 @@ def _log_oak_imu(imu_data: dict, t0: float):
 @click.option('--app-id', default='grabette_viz', help='Rerun application ID')
 @click.option('--gravity-align/--no-gravity-align', default=False,
               help='Re-align trajectory so first IMU gravity maps to world -Z. '
-                   'Normally NOT needed — run_oak_slam already does this when '
+                   'Normally NOT needed — run_slam already does this when '
                    'producing camera_trajectory.csv. Use for legacy CSVs that '
                    'predate the in-pipeline gravity align.')
 def main(episode_dir, show_video, video_skip, app_id, gravity_align):
-    """Visualize OAK SLAM trajectory from a processed episode directory."""
+    """Visualize the SLAM trajectory from a processed episode directory."""
     episode_dir = Path(episode_dir)
-    oak_dir = episode_dir / "oak"
+    slam_dir = episode_dir / "slam_input"
 
     traj_csv = episode_dir / "camera_trajectory.csv"
     if not traj_csv.exists():
@@ -163,11 +173,11 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
 
     g_unit_for_log = None  # gravity direction in trajectory frame (pre-align)
     if gravity_align:
-        if not oak_dir.is_dir():
-            print("Error: --gravity-align requires the oak/ subdir (run convert_episode_to_oak.py first)")
+        if not slam_dir.is_dir():
+            print("Error: --gravity-align requires the slam_input/ subdir (run convert_episode_for_slam.py first)")
             sys.exit(1)
         positions, quaternions, g_unit_for_log = _gravity_align(
-            positions, quaternions, oak_dir,
+            positions, quaternions, slam_dir,
         )
         print("\n=== Gravity Alignment ===")
         print(f"  Measured g in SLAM camera frame (unit): "
@@ -191,14 +201,14 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
     df_all = df_all.copy()
     df_all['timestamp'] = df_all['timestamp'] - t0
 
-    # --- Load OAK IMU ---
-    imu_data = _load_oak_imu(oak_dir) if oak_dir.is_dir() else None
+    # --- Load the depth camera's IMU (absent on IMU-less cameras) ---
+    imu_data = _load_dcam_imu(slam_dir) if slam_dir.is_dir() else None
     if imu_data:
         print(f"IMU: {len(imu_data['accel'])} accel, {len(imu_data['gyro'])} gyro samples")
     else:
-        print("IMU: not found (expected oak/imu_acc.csv and oak/imu_gyro.csv)")
+        print("IMU: not found (expected slam_input/imu_acc.csv and slam_input/imu_gyro.csv)")
 
-    # --- Open OAK left video (what the SLAM actually saw) ---
+    # --- Open the depth camera's left video (what the SLAM actually saw) ---
     # We use dcam_left.mp4 — NOT raw_video.mp4 — because:
     #   1. raw_video.mp4 is the RPi fisheye camera, not the SLAM input.
     #   2. dcam_left.mp4 is the rectified SLAM input; its frames are 1:1
@@ -218,7 +228,7 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
             n_vframes = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             vid_w = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             vid_h = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"OAK left video: {n_vframes} frames at {video_fps:.2f} fps ({vid_w}x{vid_h})")
+            print(f"Depth-camera left video: {n_vframes} frames at {video_fps:.2f} fps ({vid_w}x{vid_h})")
     elif show_video:
         print("Video: dcam_left.mp4 not found, camera feed disabled")
 
@@ -230,7 +240,7 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
 
     if imu_data:
         print("Logging IMU data...")
-        _log_oak_imu(imu_data, t0)
+        _log_dcam_imu(imu_data, t0)
 
     # --- Blueprint ---
     try:
@@ -268,11 +278,11 @@ def main(episode_dir, show_video, video_skip, app_id, gravity_align):
     # `--gravity-align`, this should be ~(0, 0, -1) by construction (since the
     # align step now operates on world-frame gravity, not camera-frame).
     g_world = None
-    if oak_dir.is_dir():
+    if slam_dir.is_dir():
         try:
-            imu_acc = pd.read_csv(oak_dir / "imu_acc.csv")
+            imu_acc = pd.read_csv(slam_dir / "imu_acc.csv")
             g_imu = imu_acc[["ax", "ay", "az"]].iloc[:50].mean().to_numpy()
-            calib = json.loads((oak_dir / "calib_offline.json").read_text())
+            calib = json.loads((slam_dir / "calib_offline.json").read_text())
             R_imu_to_cam = np.array(calib["imu_to_cam"])[:3, :3]
             # Negate: accel at rest is specific force (UP); physical gravity is DOWN.
             g_cam = -(R_imu_to_cam @ g_imu)

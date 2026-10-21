@@ -1,7 +1,7 @@
 """Episode → SLAM → LeRobot → Hub pipeline, run in-process inside the Space.
 
 Thin glue over grabette_postprocess. The SLAM binary is bundled in the image
-(no Docker), so run_oak_slam is called with binary=OAK_VSLAM_BINARY.
+(no Docker), so slam.run_slam is called with binary=VSLAM_BINARY.
 """
 
 import os
@@ -12,13 +12,13 @@ from functools import partial
 from pathlib import Path
 
 from grabette_postprocess.convert import convert_episode
-from grabette_postprocess.oak_slam import run_oak_slam
+from grabette_postprocess import slam
 from grabette_postprocess.episode_manager import find_episodes
 from grabette_postprocess.checks.trajectory import check_trajectory
 from grabette_postprocess.checks.recording import check_recording
-from grabette_postprocess.checks.sync import check_oak_imu, check_image_trajectory
+from grabette_postprocess.checks.sync import check_dcam_imu, check_image_trajectory
 
-BINARY = os.environ.get("OAK_VSLAM_BINARY", "/usr/local/bin/offline_vslam")
+BINARY = os.environ.get("VSLAM_BINARY", "/usr/local/bin/offline_vslam")
 
 # LeRobot's push_to_hub (v0.6.0) takes no token argument — it resolves the HF
 # token from the process-global environment. Concurrent conversions run in
@@ -29,13 +29,13 @@ _PUSH_LOCK = threading.Lock()
 
 
 def _check_sync(episode_dir):
-    """Thin adapter: run check_oak_imu and normalise to {verdict, message}."""
-    result = check_oak_imu(episode_dir)
+    """Thin adapter: run check_dcam_imu and normalise to {verdict, message}."""
+    result = check_dcam_imu(episode_dir)
     if result is None:
         return None
     lag_ms = abs(result["lag"]) * 1000
     note = result.get("note", "")
-    msg = f"OAK cam↔gyro lag {lag_ms:.1f} ms"
+    msg = f"depth-cam ↔ gyro lag {lag_ms:.1f} ms"
     if note:
         msg += f" — {note}"
     return {"verdict": result["verdict"], "message": msg}
@@ -230,17 +230,17 @@ def _precheck_episode(ep: Path, run_sync: bool = False):
     (runs in a worker thread). Returns (result_dict, log_lines).
 
     result_dict = {ep, name, errors, warnings, sync} where sync is the
-    arducam↔OAK-gyro verdict dict, or None when the sync check was disabled
+    depth-cam↔gyro verdict dict, or None when the sync check was disabled
     (run_sync=False, the default) or couldn't be computed. The caller uses
     errors/warnings/sync to decide which episodes to flag for the pre-SLAM review.
     Operates on the raw recording layout (before convert_episode).
 
-    run_sync: the OAK cam↔gyro sync check is a debug-only diagnostic (opt-in);
+    run_sync: the depth-cam↔gyro sync check is a debug-only diagnostic (opt-in);
     when False it's skipped entirely and sync stays None.
     """
     lines = []
     name = episode_label(ep)
-    # require_right=False: the unused right OAK camera shouldn't gate a run — its
+    # require_right=False: the unused right camera stream shouldn't gate a run — its
     # absence is irrelevant to SLAM/dataset, even though we now download it.
     chk = check_recording(ep, require_right=False)
     if chk["errors"] or chk["warnings"]:
@@ -268,7 +268,7 @@ def precheck_episodes(episode_dirs, log=print, should_stop=None, on_progress=Non
     episode, in parallel, BEFORE any SLAM. Returns the per-episode check dicts,
     sorted by name (see _precheck_episode for the dict shape).
 
-    run_sync: when False (the default) the OAK cam↔gyro sync diagnostic is skipped;
+    run_sync: when False (the default) the depth-cam↔gyro sync diagnostic is skipped;
     set True for debugging."""
     fn = partial(_precheck_episode, run_sync=run_sync)
     results = _run_parallel(episode_dirs, fn, log, on_progress,
@@ -294,7 +294,7 @@ def _slam_episode(ep: Path, run_sync: bool = False):
     convert_episode(ep)
 
     lines.append(f"▶ {name}: SLAM")
-    r = run_oak_slam(ep, binary=BINARY, show_progress=False)
+    r = slam.run_slam(ep, binary=BINARY, show_progress=False)
     if r.trajectory_path is None:
         lines.append(f"  ✗ {name}: SLAM failed (rc={r.returncode})")
         return (None, None), lines
@@ -310,7 +310,7 @@ def _slam_episode(ep: Path, run_sync: bool = False):
 
     # Image↔pose temporal alignment (POST-SLAM): correlate the Arducam optical
     # flow against the trajectory's angular velocity — the end-to-end image↔pose
-    # offset the policy trains on. Complements the pre-SLAM OAK-cam↔gyro gate
+    # offset the policy trains on. Complements the pre-SLAM depth-cam↔gyro gate
     # (_check_sync), which only validates the SLAM inputs. Informational (never
     # drops); a sync failure must never abort the run. Debug-only (opt-in).
     if run_sync:
@@ -430,7 +430,7 @@ def build_lerobot(dataset_dir, target_repo, task, root, log=print,
         build with the list of (episode_dir, trajectory_report) tuples. It returns
         the episode dirs to keep — letting the caller drop episodes whose
         trajectory check came back flagged. When None, every episode is kept.
-    run_sync: enable the debug-only sync diagnostics (pre-SLAM OAK cam↔gyro and
+    run_sync: enable the debug-only sync diagnostics (pre-SLAM depth-cam↔gyro and
         post-SLAM image↔trajectory). Off by default.
     """
     # No global HF_TOKEN here: this function only builds locally and resolves the
